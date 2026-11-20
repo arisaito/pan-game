@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>01 パチンコ生地</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #3b2a1c; }
+  canvas { display: block; }
+  body { font-family: "Hiragino Maru Gothic ProN", "Hiragino Sans", sans-serif; }
+  #hud {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    font-weight: bold; font-size: 20px; line-height: 1.3;
+    color: #fff8ec; text-shadow: 0 2px 4px rgba(0,0,0,.5); text-align: center;
+    pointer-events: none; white-space: nowrap;
+  }
+  #meter { width: 260px; height: 12px; margin: 6px auto 0; border-radius: 6px;
+    background: rgba(0,0,0,.35); overflow: hidden; position: relative; }
+  #meterFill { height: 100%; width: 0; background: linear-gradient(90deg,#f6c66b,#ffe9a8); transition: width .25s; }
+  #meterLine { position: absolute; top: -2px; bottom: -2px; width: 2px; background: #fff; opacity: .8; }
+  #hint {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    font-size: 14px; line-height: 1.4; color: #fff8ecd0; width: 90%;
+    text-shadow: 0 1px 3px rgba(0,0,0,.6); text-align: center; pointer-events: none;
+  }
+  #result {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(40,25,12,.72); backdrop-filter: blur(3px);
+  }
+  #result.show { display: flex; animation: fade .4s ease-out; }
+  @keyframes fade { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: none; } }
+  #card {
+    background: #fff8ec; color: #4a3220; border-radius: 22px; padding: 22px 30px 20px;
+    width: min(440px, 88vw); text-align: center; box-shadow: 0 16px 50px rgba(0,0,0,.5);
+  }
+  #rTag { display: inline-block; padding: 4px 16px; border-radius: 999px; font-weight: bold;
+    font-size: 15px; color: #fff; letter-spacing: 2px; }
+  #rTitle { font-size: 30px; font-weight: bold; margin: 8px 0 2px; }
+  #rComment { font-size: 15px; color: #7a5a40; margin-bottom: 6px; min-height: 1.4em; }
+  #bread { display: block; margin: 4px auto; }
+  #rScore { font-size: 18px; font-weight: bold; margin: 4px 0 8px; }
+  #rItems { font-size: 14px; color: #6a4a30; line-height: 1.7; }
+  #rItems .bad { color: #c0392b; font-weight: bold; }
+  #rRetry { margin-top: 12px; font-size: 13px; color: #9a7a5a; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><div id="hudText"></div><div id="meter"><div id="meterFill"></div><div id="meterLine"></div></div></div>
+<div id="hint"></div>
+<div id="result"><div id="card">
+  <div id="rTag"></div>
+  <div id="rTitle"></div>
+  <div id="rComment"></div>
+  <canvas id="bread" width="300" height="170"></canvas>
+  <div id="rScore"></div>
+  <div id="rItems"></div>
+  <div id="rRetry">Aボタン / Rキー / クリック でもう一度</div>
+</div></div>
+<script>
+(() => {
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  const $ = id => document.getElementById(id);
+
+  // ---- 調整用パラメータ ----
+  const GOAL = 10;          // こね回数
+  const DEAD = 0.18;        // スティックを「離した」とみなす閾値
+  const MIN_PULL = 0.4;     // これ以上引いてから離すと発射
+  const MAX_SPEED = 2600;   // px/s
+  const FRICTION = 2.2;     // 減速係数
+  const BOUNCE = 0.55;
+  const START_SCORE = 30;   // 完成度の初期値
+  const KNEAD_SCORE = 3;    // 1回こねるごと
+  const PASS = 70;          // 成功ライン
+  const ITEM_INTERVAL = 1.6;// 食材の出現間隔(秒)
+  const ITEM_LIFE = 7;      // 食材が消えるまで(秒)
+  const MAX_ITEMS = 4;
+
+  // 食材リスト
+  const GOOD = [
+    { e: '🧂', n: '塩',     s: 10 },
+    { e: '🍬', n: '砂糖',   s: 10 },
+    { e: '🧈', n: 'バター', s: 12 },
+    { e: '🥛', n: '牛乳',   s: 10 },
+    { e: '🥚', n: '卵',     s: 10 },
+    { e: '🍯', n: 'はちみつ', s: 20, rare: true },
+  ];
+  const BAD = [
+    { e: '🧦', n: '靴下',   s: -25, c: '靴下の香りがする…' },
+    { e: '🐟', n: '生魚',   s: -20, c: 'なんだか生臭い…' },
+    { e: '🌶️', n: '唐辛子', s: -20, c: '口から火が出る！' },
+    { e: '🧼', n: '石けん', s: -25, c: 'あわあわ…' },
+    { e: '🔩', n: 'ネジ',   s: -30, c: '歯が欠けた！' },
+    { e: '🐛', n: 'いもむし', s: -30, c: '…なにか動いた？' },
+  ];
+
+  let W = 1, H = 1, board, boardCanvas;
+
+  function resize() {
+    W = cv.width = Math.max(1, innerWidth);
+    H = cv.height = Math.max(1, innerHeight);
+    const m = Math.min(W, H) * 0.06;
+    board = { x: m, y: m, w: W - m * 2, h: H - m * 2 };
+    buildBoard();
+  }
+
+  // ---- まな板 ----
+  function buildBoard() {
+    boardCanvas = document.createElement('canvas');
+    boardCanvas.width = W; boardCanvas.height = H;
+    const b = boardCanvas.getContext('2d');
+    b.fillStyle = '#3b2a1c'; b.fillRect(0, 0, W, H);
+    b.fillStyle = 'rgba(0,0,0,.35)';
+    roundRect(b, board.x + 6, board.y + 10, board.w, board.h, 28); b.fill();
+    const g = b.createLinearGradient(0, board.y, 0, board.y + board.h);
+    g.addColorStop(0, '#e2b77f'); g.addColorStop(1, '#cf9c62');
+    b.fillStyle = g;
+    roundRect(b, board.x, board.y, board.w, board.h, 28); b.fill();
+    b.save();
+    roundRect(b, board.x, board.y, board.w, board.h, 28); b.clip();
+    let seed = 7;
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (let i = 0; i < 70; i++) {
+      const y0 = board.y + rnd() * board.h;
+      const amp = 2 + rnd() * 8, freq = 0.002 + rnd() * 0.006, ph = rnd() * 6;
+      b.strokeStyle = `rgba(${120 + rnd() * 40 | 0},${70 + rnd() * 30 | 0},30,${0.06 + rnd() * 0.12})`;
+      b.lineWidth = 1 + rnd() * 2.5;
+      b.beginPath();
+      for (let x = board.x; x <= board.x + board.w; x += 8) {
+        const y = y0 + Math.sin(x * freq + ph) * amp + Math.sin(x * freq * 3.1) * amp * 0.3;
+        x === board.x ? b.moveTo(x, y) : b.lineTo(x, y);
+      }
+      b.stroke();
+    }
+    for (let i = 0; i < 1400; i++) {
+      b.fillStyle = `rgba(255,252,240,${rnd() * 0.25})`;
+      b.beginPath();
+      b.arc(board.x + rnd() * board.w, board.y + rnd() * board.h, rnd() * 2.2, 0, 7); b.fill();
+    }
+    b.restore();
+    b.strokeStyle = 'rgba(90,55,25,.6)'; b.lineWidth = 4;
+    roundRect(b, board.x, board.y, board.w, board.h, 28); b.stroke();
+  }
+
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r); c.closePath();
+  }
+
+  // ---- 状態 ----
+  const N = 36;
+  let dough, count, done, particles, splats, peak, pullVec, shake;
+  let items, itemTimer, collected, score, popups, resultShown, finishTimer;
+
+  function reset() {
+    dough = {
+      x: W / 2, y: H / 2, vx: 0, vy: 0,
+      r: Math.min(W, H) * 0.09,
+      lumps: Array.from({ length: N }, () => Math.random()),
+      squash: 0, squashAng: 0, wobble: 0, rot: 0, moving: false,
+      specks: [],
+    };
+    count = 0; done = false; particles = []; splats = [];
+    peak = { x: 0, y: 0, m: 0 }; pullVec = { x: 0, y: 0 };
+    shake = 0;
+    items = []; itemTimer = 0.8; collected = []; score = START_SCORE; popups = [];
+    resultShown = false; finishTimer = 0;
+    $('result').classList.remove('show');
+  }
+
+  // ---- 入力 ----
+  const mouse = { down: false, sx: 0, sy: 0, x: 0, y: 0 };
+  cv.addEventListener('pointerdown', e => {
+    mouse.down = true; mouse.sx = mouse.x = e.clientX; mouse.sy = mouse.y = e.clientY;
+  });
+  addEventListener('pointermove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+  addEventListener('pointerup', e => {
+    if (!mouse.down) return;
+    mouse.down = false;
+    // 一瞬のドラッグでも取りこぼさないよう、離した瞬間の引き量を直接使う
+    const R = Math.min(W, H) * 0.25;
+    const x = (e.clientX - mouse.sx) / R, y = (e.clientY - mouse.sy) / R;
+    const raw = Math.hypot(x, y), m = Math.min(1, raw);
+    if (m > peak.m && raw > 0) peak = { x: x / raw * m, y: y / raw * m, m };
+  });
+  addEventListener('keydown', e => { if ((e.key === 'r' || e.key === 'R')) reset(); });
+  $('result').addEventListener('click', () => { if (resultShown) reset(); });
+
+  let lastA = false;
+  function readStick() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (const p of pads) {
+      if (!p) continue;
+      const a = p.buttons[0] && p.buttons[0].pressed;
+      if (a && !lastA && resultShown) reset();
+      lastA = a;
+      let x = p.axes[0] || 0, y = p.axes[1] || 0;
+      const rx = p.axes[2] || 0, ry = p.axes[3] || 0;
+      if (Math.hypot(rx, ry) > Math.hypot(x, y)) { x = rx; y = ry; }
+      return { x, y, pad: true };
+    }
+    if (mouse.down) {
+      const R = Math.min(W, H) * 0.25;
+      let x = (mouse.x - mouse.sx) / R, y = (mouse.y - mouse.sy) / R;
+      const m = Math.hypot(x, y);
+      if (m > 1) { x /= m; y /= m; }
+      return { x, y, pad: false };
+    }
+    return { x: 0, y: 0, pad: false };
+  }
+
+  // ---- ループ ----
+  let last = performance.now();
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    if (W !== innerWidth || H !== innerHeight) onResize();
+    const s = readStick();
+    update(dt, s);
+    draw(s);
+  }
+
+  function update(dt, s) {
+    const d = dough;
+    const m = Math.hypot(s.x, s.y);
+
+    // 引っ張り → 離す（移動中でもOK）
+    if (!done) {
+      if (m > DEAD) {
+        pullVec.x = s.x; pullVec.y = s.y;
+        if (m >= peak.m * 0.9) peak = { x: s.x, y: s.y, m };
+      } else {
+        if (peak.m > MIN_PULL) launch(peak);
+        peak = { x: 0, y: 0, m: 0 };
+        pullVec.x = pullVec.y = 0;
+      }
+    } else {
+      pullVec.x = pullVec.y = 0; peak = { x: 0, y: 0, m: 0 };
+    }
+
+    // 移動
+    if (d.moving) {
+      d.x += d.vx * dt; d.y += d.vy * dt;
+      const k = Math.exp(-FRICTION * dt);
+      d.vx *= k; d.vy *= k;
+      d.rot += d.vx * 0.0006 * dt * 60;
+      const pad = d.r * 0.9;
+      let hit = 0;
+      if (d.x < board.x + pad) { d.x = board.x + pad; hit = Math.abs(d.vx); d.vx = Math.abs(d.vx) * BOUNCE; d.squashAng = 0; }
+      if (d.x > board.x + board.w - pad) { d.x = board.x + board.w - pad; hit = Math.abs(d.vx); d.vx = -Math.abs(d.vx) * BOUNCE; d.squashAng = 0; }
+      if (d.y < board.y + pad) { d.y = board.y + pad; hit = Math.abs(d.vy); d.vy = Math.abs(d.vy) * BOUNCE; d.squashAng = Math.PI / 2; }
+      if (d.y > board.y + board.h - pad) { d.y = board.y + board.h - pad; hit = Math.abs(d.vy); d.vy = -Math.abs(d.vy) * BOUNCE; d.squashAng = Math.PI / 2; }
+      if (hit > 150) {
+        d.squash = -Math.min(0.45, hit / 3000);
+        d.wobble = 1;
+        shake = Math.min(14, hit / 160);
+        puff(d.x, d.y, Math.min(30, hit / 60));
+        splats.push({ x: d.x, y: d.y, r: d.r * (0.6 + hit / 4000), a: 0.18 });
+      }
+      const sp = Math.hypot(d.vx, d.vy);
+      if (sp > 200 && !(pullVec.x || pullVec.y)) { d.squash = Math.max(d.squash, Math.min(0.25, sp / 8000)); d.squashAng = Math.atan2(d.vy, d.vx); }
+      if (sp < 25) { d.vx = d.vy = 0; d.moving = false; }
+    }
+
+    // 引っ張り中は生地が伸びる（移動中も）
+    if (!done && (pullVec.x || pullVec.y)) {
+      const pm = Math.hypot(pullVec.x, pullVec.y);
+      d.squash = pm * 0.45;
+      d.squashAng = Math.atan2(pullVec.y, pullVec.x);
+    } else {
+      d.squash *= Math.exp(-(d.moving ? 6 : 10) * dt);
+    }
+    d.wobble *= Math.exp(-4 * dt);
+    shake *= Math.exp(-12 * dt);
+
+    // 食材
+    if (!done) {
+      itemTimer -= dt;
+      if (itemTimer <= 0 && items.length < MAX_ITEMS) { spawnItem(); itemTimer = ITEM_INTERVAL * (0.7 + Math.random() * 0.6); }
+    }
+    for (const it of items) {
+      it.t += dt;
+      if (!it.got && Math.hypot(it.x - d.x, it.y - d.y) < d.r + it.r * 0.6) pickup(it);
+    }
+    items = items.filter(it => it.got ? it.gotT < 0.35 : it.t < ITEM_LIFE);
+    for (const it of items) if (it.got) it.gotT += dt;
+
+    // 完成判定：10回こねて生地が止まったら
+    if (!done && count >= GOAL && !d.moving) finish();
+    if (done && !resultShown) {
+      finishTimer += dt;
+      if (finishTimer > 1.2) showResult();
+    }
+
+    for (const p of particles) {
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vx *= 0.92; p.vy *= 0.92; p.life -= dt;
+    }
+    particles = particles.filter(p => p.life > 0);
+    for (const sp of splats) sp.a -= dt * 0.08;
+    splats = splats.filter(s => s.a > 0);
+    for (const p of popups) { p.y -= 40 * dt; p.t += dt; }
+    popups = popups.filter(p => p.t < 1.2);
+  }
+
+  function spawnItem() {
+    // はちみつは低確率、悪い食材は4割くらい
+    let def;
+    if (Math.random() < 0.4) def = BAD[Math.random() * BAD.length | 0];
+    else {
+      const pool = GOOD.filter(g => !g.rare || Math.random() < 0.25);
+      def = pool[Math.random() * pool.length | 0];
+    }
+    const r = Math.min(W, H) * 0.045;
+    const margin = r * 2;
+    let x, y, tries = 0;
+    do {
+      x = board.x + margin + Math.random() * (board.w - margin * 2);
+      y = board.y + margin + Math.random() * (board.h - margin * 2);
+      tries++;
+    } while (tries < 20 && (Math.hypot(x - dough.x, y - dough.y) < dough.r * 2.5 ||
+             items.some(o => Math.hypot(o.x - x, o.y - y) < r * 3)));
+    items.push({ ...def, bad: BAD.includes(def), x, y, r, t: 0, got: false, gotT: 0 });
+  }
+
+  function pickup(it) {
+    it.got = true;
+    collected.push(it);
+    score += it.s;
+    dough.wobble = 1;
+    const good = !it.bad;
+    popups.push({ x: it.x, y: it.y - it.r, t: 0, text: `${it.n} ${it.s > 0 ? '+' : ''}${it.s}`, good });
+    // 生地に混ざった色の粒
+    const col = good ? 'rgba(255,215,120,.9)' : 'rgba(120,80,140,.9)';
+    for (let i = 0; i < 4; i++) dough.specks.push({ a: Math.random() * 7, r: Math.random() * 0.7, c: col });
+    if (it.bad) shake = 10;
+    for (let i = 0; i < 14; i++) {
+      const a = Math.random() * 7, sp = 80 + Math.random() * 200;
+      particles.push({ x: it.x, y: it.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 0.6, r: 2 + Math.random() * 2,
+        col: good ? '255,230,140' : '150,90,170' });
+    }
+    rumble(good ? 0.2 : 0.8, good ? 60 : 200);
+  }
+
+  function launch(p) {
+    const d = dough;
+    const power = Math.min(1, p.m);
+    d.vx = -p.x / p.m * power * MAX_SPEED;
+    d.vy = -p.y / p.m * power * MAX_SPEED;
+    d.moving = true;
+    d.wobble = 1;
+    count = Math.min(GOAL, count + 1);
+    score += KNEAD_SCORE;
+    const smooth = count / GOAL;
+    d.lumps = d.lumps.map(v => v * (1 - smooth * 0.5) + Math.random() * (1 - smooth) * 0.5);
+    puff(d.x, d.y, 12);
+    rumble(0.6 * power, 120);
+  }
+
+  function rumble(strong, ms) {
+    if (!navigator.getGamepads) return;
+    for (const pad of navigator.getGamepads()) {
+      if (pad && pad.vibrationActuator) {
+        pad.vibrationActuator.playEffect('dual-rumble', { duration: ms, strongMagnitude: strong, weakMagnitude: 0.4 }).catch(() => {});
+      }
+    }
+  }
+
+  function finish() {
+    done = true;
+    dough.wobble = 1;
+    puff(dough.x, dough.y, 60);
+    for (const it of items) if (!it.got) it.t = Math.max(it.t, ITEM_LIFE - 0.4);
+  }
+
+  function puff(x, y, n) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, sp = 60 + Math.random() * 260;
+      particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 0.5 + Math.random() * 0.7, r: 1.5 + Math.random() * 3 });
+    }
+  }
+
+  // ---- 結果画面 ----
+  function showResult() {
+    resultShown = true;
+    const bads = collected.filter(c => c.bad);
+    const goods = collected.filter(c => !c.bad);
+    const sc = Math.max(0, Math.min(100, score));
+    const ok = sc >= PASS;
+    let title, comment;
+    if (ok && sc >= 95) { title = '極上パン！'; comment = 'お店に並べられるレベル。ふわっふわ！'; }
+    else if (ok) { title = 'おいしいパン'; comment = bads.length ? `ちょっと変な味もするけど…まあ合格！` : 'いい香り。ちゃんとパンだ！'; }
+    else if (bads.length) {
+      const worst = bads.reduce((a, b) => a.s < b.s ? a : b);
+      title = '謎のパン…'; comment = worst.c;
+    } else { title = '味気ないパン'; comment = '材料が足りなかったみたい…'; }
+
+    $('rTag').textContent = ok ? '成功' : '失敗';
+    $('rTag').style.background = ok ? '#e0962f' : '#8a6d5a';
+    $('rTitle').textContent = title;
+    $('rComment').textContent = comment;
+    $('rScore').textContent = `完成度 ${sc} / 100（合格 ${PASS}）`;
+    const list = arr => {
+      const m = new Map();
+      for (const c of arr) m.set(c.n, { e: c.e, n: c.n, k: (m.get(c.n)?.k || 0) + 1 });
+      return [...m.values()].map(v => `${v.e}${v.n}${v.k > 1 ? '×' + v.k : ''}`).join('　');
+    };
+    $('rItems').innerHTML =
+      `こね ${count}回 +${count * KNEAD_SCORE}<br>` +
+      (goods.length ? `入れた材料：${list(goods)}<br>` : '入れた材料：なし<br>') +
+      (bads.length ? `<span class="bad">入っちゃった：${list(bads)}</span>` : '');
+    drawBread(sc, ok, bads);
+    $('result').classList.add('show');
+  }
+
+  function drawBread(sc, ok, bads) {
+    const c = $('bread'), b = c.getContext('2d');
+    b.clearRect(0, 0, c.width, c.height);
+    const cx = 150, cy = 105;
+    // ふくらみ：完成度が高いほど大きく
+    const k = 0.55 + sc / 100 * 0.5;
+    const w = 120 * k, h = 70 * k;
+    // 皿
+    b.fillStyle = '#e8dccb';
+    b.beginPath(); b.ellipse(cx, cy + h * 0.55, 140, 22, 0, 0, 7); b.fill();
+    // パン本体（失敗は焦げ茶・ぺちゃんこ、成功はきつね色）
+    const top = ok ? '#c8792b' : '#7a4e2e', mid = ok ? '#e2a04f' : '#9a6a44';
+    const g = b.createLinearGradient(0, cy - h, 0, cy + h * 0.5);
+    g.addColorStop(0, top); g.addColorStop(1, mid);
+    b.fillStyle = g;
+    b.beginPath();
+    b.moveTo(cx - w, cy + h * 0.45);
+    b.bezierCurveTo(cx - w * 1.05, cy - h * 0.9, cx + w * 1.05, cy - h * 0.9, cx + w, cy + h * 0.45);
+    b.closePath(); b.fill();
+    // クープ
+    b.strokeStyle = ok ? 'rgba(255,230,170,.8)' : 'rgba(60,35,20,.6)'; b.lineWidth = 5; b.lineCap = 'round';
+    for (let i = -1; i <= 1; i++) {
+      b.beginPath();
+      b.moveTo(cx + i * w * 0.45 - 14, cy - h * 0.25);
+      b.quadraticCurveTo(cx + i * w * 0.45, cy - h * 0.45, cx + i * w * 0.45 + 14, cy - h * 0.2);
+      b.stroke();
+    }
+    // ツヤ
+    b.fillStyle = `rgba(255,255,255,${ok ? 0.25 : 0.08})`;
+    b.beginPath(); b.ellipse(cx - w * 0.35, cy - h * 0.35, w * 0.25, h * 0.1, -0.3, 0, 7); b.fill();
+    // 入っちゃったものが飛び出してる
+    b.font = '30px serif'; b.textAlign = 'center'; b.textBaseline = 'middle';
+    b.fillStyle = '#000'; // 絵文字は fillStyle の透明度を受けるので不透明に戻す
+    bads.slice(0, 5).forEach((it, i) => {
+      const t = (i + 0.5) / Math.min(5, bads.length);
+      const x = cx - w * 0.8 + t * w * 1.6;
+      const y = cy - h * 0.55 + Math.abs(t - 0.5) * h * 0.6;
+      b.save(); b.translate(x, y); b.rotate((i % 2 ? 1 : -1) * 0.35);
+      b.fillText(it.e, 0, 0); b.restore();
+    });
+    // 失敗時の煙 / 成功時のキラキラ
+    if (!ok) {
+      b.strokeStyle = 'rgba(120,110,100,.5)'; b.lineWidth = 3;
+      for (let i = 0; i < 3; i++) {
+        b.beginPath();
+        const x = cx - 30 + i * 30;
+        b.moveTo(x, cy - h - 4);
+        b.bezierCurveTo(x - 10, cy - h - 18, x + 10, cy - h - 28, x, cy - h - 42);
+        b.stroke();
+      }
+    } else {
+      b.fillStyle = '#ffd86b';
+      [[cx - w - 8, cy - h * 0.6], [cx + w + 6, cy - h * 0.8], [cx + w * 0.2, cy - h - 14]].forEach(([x, y]) => {
+        b.beginPath();
+        for (let i = 0; i < 8; i++) { const a = i / 8 * 7, r = i % 2 ? 3 : 10; b.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); }
+        b.fill();
+      });
+    }
+  }
+
+  // ---- 描画 ----
+  function draw(s) {
+    const t = performance.now() / 1000;
+    ctx.save();
+    if (shake > 0.3) ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+    ctx.drawImage(boardCanvas, 0, 0);
+
+    for (const sp of splats) {
+      ctx.fillStyle = `rgba(255,250,235,${sp.a})`;
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, sp.r, 0, 7); ctx.fill();
+    }
+
+    // 食材
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const it of items) {
+      let a = 1, sc = 1, x = it.x, y = it.y;
+      if (it.got) {
+        const k = it.gotT / 0.35;
+        x += (dough.x - x) * k; y += (dough.y - y) * k; sc = 1 - k; a = 1 - k;
+      } else {
+        sc = Math.min(1, it.t / 0.25) * (1 + Math.sin(t * 4 + it.x) * 0.05);
+        const left = ITEM_LIFE - it.t;
+        if (left < 2) a = (Math.sin(t * 20) > 0) ? 1 : 0.35;
+      }
+      ctx.globalAlpha = a;
+      ctx.save(); ctx.translate(x, y + Math.sin(t * 3 + it.y) * 3); ctx.scale(sc, sc);
+      ctx.fillStyle = 'rgba(60,35,15,.22)';
+      ctx.beginPath(); ctx.ellipse(3, it.r * 0.75, it.r * 0.9, it.r * 0.35, 0, 0, 7); ctx.fill();
+      ctx.fillStyle = 'rgba(255,250,240,.85)';
+      ctx.beginPath(); ctx.arc(0, 0, it.r, 0, 7); ctx.fill();
+      ctx.font = `${it.r * 1.25}px serif`;
+      ctx.fillText(it.e, 0, 2);
+      ctx.font = `bold ${Math.max(11, it.r * 0.42)}px "Hiragino Sans", sans-serif`;
+      ctx.fillStyle = '#5a3a20';
+      ctx.fillText(it.n, 0, it.r + 12);
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
+
+    const d = dough;
+    // 狙い線
+    if (!done && (pullVec.x || pullVec.y)) {
+      const raw = Math.hypot(pullVec.x, pullVec.y), pm = Math.min(1, raw);
+      const ax = -pullVec.x / raw, ay = -pullVec.y / raw;
+      const len = d.r * 1.3 + pm * Math.min(W, H) * 0.35;
+      const col = pm > MIN_PULL ? 'rgba(255,255,255,.75)' : 'rgba(255,255,255,.3)';
+      ctx.strokeStyle = col; ctx.fillStyle = col;
+      ctx.lineWidth = 4; ctx.setLineDash([10, 12]);
+      ctx.beginPath(); ctx.moveTo(d.x + ax * d.r * 1.2, d.y + ay * d.r * 1.2);
+      ctx.lineTo(d.x + ax * len, d.y + ay * len); ctx.stroke();
+      ctx.setLineDash([]);
+      const hx = d.x + ax * len, hy = d.y + ay * len, an = Math.atan2(ay, ax);
+      ctx.beginPath();
+      ctx.moveTo(hx + Math.cos(an) * 16, hy + Math.sin(an) * 16);
+      ctx.lineTo(hx + Math.cos(an + 2.5) * 14, hy + Math.sin(an + 2.5) * 14);
+      ctx.lineTo(hx + Math.cos(an - 2.5) * 14, hy + Math.sin(an - 2.5) * 14);
+      ctx.fill();
+    }
+
+    for (const p of particles) {
+      ctx.fillStyle = `rgba(${p.col || '255,253,245'},${Math.min(1, p.life) * 0.8})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill();
+    }
+
+    drawDough(d);
+
+    // ポップアップ
+    for (const p of popups) {
+      ctx.globalAlpha = Math.min(1, (1.2 - p.t) * 2);
+      ctx.font = 'bold 22px "Hiragino Maru Gothic ProN", sans-serif';
+      ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(60,30,10,.7)';
+      ctx.strokeText(p.text, p.x, p.y);
+      ctx.fillStyle = p.good ? '#ffe680' : '#ff8a8a';
+      ctx.fillText(p.text, p.x, p.y);
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+
+    // HUD
+    const sc = Math.max(0, Math.min(100, score));
+    $('hudText').innerHTML = done
+      ? '🍞 焼き上がり…'
+      : `こね ${count} / ${GOAL}　<span style="font-size:15px">完成度 ${sc}</span>`;
+    $('meterFill').style.width = sc + '%';
+    $('meterLine').style.left = PASS + '%';
+    $('hint').textContent = s.pad
+      ? 'スティックを傾けて…離す！ 飛んでる途中でも引っぱれる。いい材料だけ拾おう'
+      : 'マウスでドラッグして離す（パッドはボタンを一度押すと認識）。いい材料だけ拾おう';
+  }
+
+  function drawDough(d) {
+    const t = performance.now() / 1000;
+    const smooth = count / GOAL;
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    ctx.fillStyle = 'rgba(60,35,15,.28)';
+    ctx.beginPath(); ctx.ellipse(6, d.r * 0.35, d.r * 1.05, d.r * 0.75, 0, 0, 7); ctx.fill();
+
+    ctx.rotate(d.squashAng);
+    const sq = d.squash + Math.sin(t * 22) * d.wobble * 0.08;
+    ctx.scale(1 + sq, 1 / (1 + sq));
+    ctx.rotate(-d.squashAng + d.rot);
+
+    const rough = 0.22 * (1 - smooth) + 0.02;
+    const pts = [];
+    for (let i = 0; i < N; i++) {
+      const a = i / N * Math.PI * 2;
+      const lump = (d.lumps[(i - 1 + N) % N] + d.lumps[i] * 2 + d.lumps[(i + 1) % N]) / 4;
+      const rr = d.r * (1 - rough / 2 + lump * rough);
+      pts.push([Math.cos(a) * rr, Math.sin(a) * rr]);
+    }
+    const path = () => {
+      ctx.beginPath();
+      for (let i = 0; i < N; i++) {
+        const p = pts[i], q = pts[(i + 1) % N];
+        const mx = (p[0] + q[0]) / 2, my = (p[1] + q[1]) / 2;
+        i === 0 ? ctx.moveTo(mx, my) : ctx.quadraticCurveTo(p[0], p[1], mx, my);
+      }
+      const p = pts[0], q = pts[1];
+      ctx.quadraticCurveTo(p[0], p[1], (p[0] + q[0]) / 2, (p[1] + q[1]) / 2);
+      ctx.closePath();
+    };
+
+    const c0 = [228 + smooth * 22, 205 + smooth * 30, 160 + smooth * 55];
+    const g = ctx.createRadialGradient(-d.r * 0.3, -d.r * 0.4, d.r * 0.1, 0, 0, d.r * 1.15);
+    g.addColorStop(0, `rgb(${Math.min(255, c0[0] + 20)},${Math.min(255, c0[1] + 22)},${Math.min(255, c0[2] + 25)})`);
+    g.addColorStop(1, `rgb(${c0[0] - 30},${c0[1] - 35},${c0[2] - 40})`);
+    path(); ctx.fillStyle = g; ctx.fill();
+
+    ctx.save(); path(); ctx.clip();
+    const spots = Math.round(40 * (1 - smooth));
+    for (let i = 0; i < spots; i++) {
+      const a = d.lumps[i % N] * 7 + i, rr = d.r * (0.2 + d.lumps[(i * 7) % N] * 0.7);
+      ctx.fillStyle = i % 2 ? 'rgba(255,255,250,.45)' : 'rgba(170,130,80,.18)';
+      ctx.beginPath(); ctx.arc(Math.cos(a) * rr, Math.sin(a) * rr, 2 + (i % 5), 0, 7); ctx.fill();
+    }
+    for (const sp of d.specks) {
+      ctx.fillStyle = sp.c;
+      ctx.beginPath(); ctx.arc(Math.cos(sp.a) * sp.r * d.r, Math.sin(sp.a) * sp.r * d.r, 3, 0, 7); ctx.fill();
+    }
+    ctx.fillStyle = `rgba(255,255,255,${0.1 + smooth * 0.35})`;
+    ctx.beginPath(); ctx.ellipse(-d.r * 0.32, -d.r * 0.38, d.r * 0.35, d.r * 0.18, -0.5, 0, 7); ctx.fill();
+    ctx.restore();
+
+    ctx.strokeStyle = 'rgba(150,105,60,.35)'; ctx.lineWidth = 2;
+    path(); ctx.stroke();
+    ctx.restore();
+  }
+
+  function onResize() {
+    if (!innerWidth || !innerHeight) return;
+    const rx = dough ? dough.x / W : .5, ry = dough ? dough.y / H : .5;
+    const ox = W, oy = H;
+    resize();
+    if (dough) {
+      dough.x = rx * W; dough.y = ry * H;
+      dough.r = Math.min(W, H) * 0.09;
+      for (const it of items) { it.x = it.x / ox * W; it.y = it.y / oy * H; it.r = Math.min(W, H) * 0.045; }
+    }
+  }
+  addEventListener('resize', onResize);
+  resize();
+  reset();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
