@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>03 つかんで引っぱる生地</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #3b2a1c; }
+  canvas { display: block; cursor: none; }
+  body { font-family: "Hiragino Maru Gothic ProN", "Hiragino Sans", sans-serif; }
+  #hud {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    font-weight: bold; font-size: 20px; line-height: 1.3;
+    color: #fff8ec; text-shadow: 0 2px 4px rgba(0,0,0,.5); text-align: center;
+    pointer-events: none; white-space: nowrap;
+  }
+  #meter { width: 260px; height: 12px; margin: 6px auto 0; border-radius: 6px;
+    background: rgba(0,0,0,.35); overflow: hidden; position: relative; }
+  #meterFill { height: 100%; width: 0; background: linear-gradient(90deg,#f6c66b,#ffe9a8); transition: width .25s; }
+  #meterLine { position: absolute; top: -2px; bottom: -2px; width: 2px; background: #fff; opacity: .8; }
+  #hint {
+    position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+    font-size: 14px; line-height: 1.4; color: #fff8ecd0; width: 90%;
+    text-shadow: 0 1px 3px rgba(0,0,0,.6); text-align: center; pointer-events: none;
+  }
+  #result {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(40,25,12,.72); backdrop-filter: blur(3px); cursor: default;
+  }
+  #result.show { display: flex; animation: fade .4s ease-out; }
+  @keyframes fade { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: none; } }
+  #card {
+    background: #fff8ec; color: #4a3220; border-radius: 22px; padding: 22px 30px 20px;
+    width: min(440px, 88vw); text-align: center; box-shadow: 0 16px 50px rgba(0,0,0,.5);
+  }
+  #rTag { display: inline-block; padding: 4px 16px; border-radius: 999px; font-weight: bold;
+    font-size: 15px; color: #fff; letter-spacing: 2px; }
+  #rTitle { font-size: 30px; font-weight: bold; margin: 8px 0 2px; }
+  #rComment { font-size: 15px; color: #7a5a40; margin-bottom: 6px; min-height: 1.4em; }
+  #bread { display: block; margin: 4px auto; }
+  #rScore { font-size: 18px; font-weight: bold; margin: 4px 0 8px; }
+  #rItems { font-size: 14px; color: #6a4a30; line-height: 1.7; }
+  #rItems .bad { color: #c0392b; font-weight: bold; }
+  #rRetry { margin-top: 12px; font-size: 13px; color: #9a7a5a; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><div id="hudText"></div><div id="meter"><div id="meterFill"></div><div id="meterLine"></div></div></div>
+<div id="hint"></div>
+<div id="result"><div id="card">
+  <div id="rTag"></div>
+  <div id="rTitle"></div>
+  <div id="rComment"></div>
+  <canvas id="bread" width="300" height="170"></canvas>
+  <div id="rScore"></div>
+  <div id="rItems"></div>
+  <div id="rRetry">Aボタン / Rキー / クリック でもう一度</div>
+</div></div>
+<script>
+(() => {
+  const cv = document.getElementById('c');
+  const ctx = cv.getContext('2d');
+  const $ = id => document.getElementById(id);
+
+  // ---- 調整用パラメータ ----
+  const GOAL = 10;
+  const STICK_DEAD = 0.15;
+  const HAND_SPEED = 1.1;     // 手の移動速度（画面の短辺比 / 秒）
+  const MAX_STRETCH = 0.30;   // 最大の引っ張り距離（画面の短辺比）
+  const MIN_STRETCH = 0.25;   // 最大に対してこれ以上引いて離すと発射
+  const PULL_DRAG = 0.65;     // 引っ張るほど手が重くなる度合い
+  const MAX_SPEED = 2600;
+  const FRICTION = 2.2;
+  const BOUNCE = 0.55;
+  const START_SCORE = 30;
+  const KNEAD_SCORE = 3;
+  const PASS = 70;
+  const ITEM_INTERVAL = 1.6;
+  const ITEM_LIFE = 8;
+  const MAX_ITEMS = 4;
+
+  const GOOD = [
+    { e: '🧂', n: '塩',     s: 10 },
+    { e: '🍬', n: '砂糖',   s: 10 },
+    { e: '🧈', n: 'バター', s: 12 },
+    { e: '🥛', n: '牛乳',   s: 10 },
+    { e: '🥚', n: '卵',     s: 10 },
+    { e: '🍯', n: 'はちみつ', s: 20, rare: true },
+  ];
+  const BAD = [
+    { e: '🧦', n: '靴下',   s: -25, c: '靴下の香りがする…' },
+    { e: '🐟', n: '生魚',   s: -20, c: 'なんだか生臭い…' },
+    { e: '🌶️', n: '唐辛子', s: -20, c: '口から火が出る！' },
+    { e: '🧼', n: '石けん', s: -25, c: 'あわあわ…' },
+    { e: '🔩', n: 'ネジ',   s: -30, c: '歯が欠けた！' },
+    { e: '🐛', n: 'いもむし', s: -30, c: '…なにか動いた？' },
+  ];
+
+  let W = 1, H = 1, S = 1, board, boardCanvas;
+
+  function resize() {
+    W = cv.width = Math.max(1, innerWidth);
+    H = cv.height = Math.max(1, innerHeight);
+    S = Math.min(W, H);
+    const m = S * 0.06;
+    board = { x: m, y: m, w: W - m * 2, h: H - m * 2 };
+    buildBoard();
+  }
+
+  function buildBoard() {
+    boardCanvas = document.createElement('canvas');
+    boardCanvas.width = W; boardCanvas.height = H;
+    const b = boardCanvas.getContext('2d');
+    b.fillStyle = '#3b2a1c'; b.fillRect(0, 0, W, H);
+    b.fillStyle = 'rgba(0,0,0,.35)';
+    roundRect(b, board.x + 6, board.y + 10, board.w, board.h, 28); b.fill();
+    const g = b.createLinearGradient(0, board.y, 0, board.y + board.h);
+    g.addColorStop(0, '#e2b77f'); g.addColorStop(1, '#cf9c62');
+    b.fillStyle = g;
+    roundRect(b, board.x, board.y, board.w, board.h, 28); b.fill();
+    b.save();
+    roundRect(b, board.x, board.y, board.w, board.h, 28); b.clip();
+    let seed = 7;
+    const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    for (let i = 0; i < 70; i++) {
+      const y0 = board.y + rnd() * board.h;
+      const amp = 2 + rnd() * 8, freq = 0.002 + rnd() * 0.006, ph = rnd() * 6;
+      b.strokeStyle = `rgba(${120 + rnd() * 40 | 0},${70 + rnd() * 30 | 0},30,${0.06 + rnd() * 0.12})`;
+      b.lineWidth = 1 + rnd() * 2.5;
+      b.beginPath();
+      for (let x = board.x; x <= board.x + board.w; x += 8) {
+        const y = y0 + Math.sin(x * freq + ph) * amp + Math.sin(x * freq * 3.1) * amp * 0.3;
+        x === board.x ? b.moveTo(x, y) : b.lineTo(x, y);
+      }
+      b.stroke();
+    }
+    for (let i = 0; i < 1400; i++) {
+      b.fillStyle = `rgba(255,252,240,${rnd() * 0.25})`;
+      b.beginPath();
+      b.arc(board.x + rnd() * board.w, board.y + rnd() * board.h, rnd() * 2.2, 0, 7); b.fill();
+    }
+    b.restore();
+    b.strokeStyle = 'rgba(90,55,25,.6)'; b.lineWidth = 4;
+    roundRect(b, board.x, board.y, board.w, board.h, 28); b.stroke();
+  }
+
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r); c.closePath();
+  }
+
+  // ---- 状態 ----
+  const N = 36;
+  let dough, hand, count, done, particles, splats, shake;
+  let items, itemTimer, collected, score, popups, resultShown, finishTimer;
+
+  function reset() {
+    dough = {
+      x: W / 2, y: H / 2, vx: 0, vy: 0,
+      r: S * 0.09,
+      lumps: Array.from({ length: N }, () => Math.random()),
+      squash: 0, squashAng: 0, wobble: 0, rot: 0, moving: false,
+      specks: [],
+    };
+    hand = {
+      x: W / 2, y: H * 0.75,
+      grip: false,       // トリガーが押されているか
+      holding: false,    // 生地をつかんでいるか
+      lock: false,       // 離した直後、トリガーを一度離すまで再ホールドしない
+      grabOX: 0, grabOY: 0,
+      close: 0,          // 握り具合アニメ 0..1
+    };
+    count = 0; done = false; particles = []; splats = [];
+    shake = 0;
+    items = []; itemTimer = 0.8; collected = []; score = START_SCORE; popups = [];
+    resultShown = false; finishTimer = 0;
+    $('result').classList.remove('show');
+  }
+
+  // ---- 入力 ----
+  let mode = 'mouse';
+  const mouse = { x: 0, y: 0, down: false };
+  const keys = new Set();
+  addEventListener('pointermove', e => { mouse.x = e.clientX; mouse.y = e.clientY; mode = 'mouse'; });
+  cv.addEventListener('pointerdown', e => { mouse.down = true; mouse.x = e.clientX; mouse.y = e.clientY; mode = 'mouse'; });
+  addEventListener('pointerup', () => { mouse.down = false; });
+  addEventListener('keydown', e => {
+    if (e.key === 'r' || e.key === 'R') { reset(); return; }
+    keys.add(e.code);
+    if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD'].includes(e.code)) {
+      mode = 'key'; e.preventDefault();
+    }
+  });
+  addEventListener('keyup', e => keys.delete(e.code));
+  $('result').addEventListener('click', () => { if (resultShown) reset(); });
+
+  let lastA = false, padSeen = false;
+  function readInput() {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (const p of pads) {
+      if (!p) continue;
+      padSeen = true;
+      const btn = i => p.buttons[i] ? (p.buttons[i].value || (p.buttons[i].pressed ? 1 : 0)) : 0;
+      const a = btn(0) > 0.5;
+      if (a && !lastA && resultShown) reset();
+      lastA = a;
+      let x = p.axes[0] || 0, y = p.axes[1] || 0;
+      // トリガー：RT / LT（念のため RB / LB も）
+      const trig = Math.max(btn(7), btn(6), btn(5), btn(4)) > 0.35;
+      const m = Math.hypot(x, y);
+      if (m > STICK_DEAD || trig) mode = 'pad';
+      if (mode === 'pad') {
+        if (m < STICK_DEAD) { x = 0; y = 0; }
+        return { type: 'vel', x, y, grip: trig };
+      }
+    }
+    if (mode === 'key') {
+      let x = 0, y = 0;
+      if (keys.has('ArrowLeft') || keys.has('KeyA')) x -= 1;
+      if (keys.has('ArrowRight') || keys.has('KeyD')) x += 1;
+      if (keys.has('ArrowUp') || keys.has('KeyW')) y -= 1;
+      if (keys.has('ArrowDown') || keys.has('KeyS')) y += 1;
+      const m = Math.hypot(x, y) || 1;
+      return { type: 'vel', x: x / m, y: y / m, grip: keys.has('Space') };
+    }
+    return { type: 'pos', x: mouse.x, y: mouse.y, grip: mouse.down };
+  }
+
+  // ---- ループ ----
+  let last = performance.now();
+  function frame(now) {
+    requestAnimationFrame(frame);
+    const dt = Math.min(0.033, (now - last) / 1000);
+    last = now;
+    if (W !== innerWidth || H !== innerHeight) onResize();
+    const inp = readInput();
+    update(dt, inp);
+    draw();
+  }
+
+  function stretchInfo() {
+    const ax = dough.x + hand.grabOX, ay = dough.y + hand.grabOY; // つかんだ点の元の位置
+    const dx = hand.x - ax, dy = hand.y - ay;
+    const dist = Math.hypot(dx, dy);
+    return { ax, ay, dx, dy, dist, k: Math.min(1, dist / (S * MAX_STRETCH)) };
+  }
+
+  function update(dt, inp) {
+    const d = dough, h = hand;
+
+    // ---- 手の移動 ----
+    let tx, ty;
+    if (inp.type === 'vel') {
+      let spd = S * HAND_SPEED;
+      if (h.holding) spd *= 1 - PULL_DRAG * stretchInfo().k; // 伸ばすほど重い
+      tx = h.x + inp.x * spd * dt;
+      ty = h.y + inp.y * spd * dt;
+    } else {
+      tx = inp.x; ty = inp.y;
+    }
+    tx = Math.max(board.x, Math.min(board.x + board.w, tx));
+    ty = Math.max(board.y, Math.min(board.y + board.h, ty));
+    if (h.holding) {
+      // 伸ばせる距離に制限
+      const ax = d.x + h.grabOX, ay = d.y + h.grabOY;
+      const dx = tx - ax, dy = ty - ay, dist = Math.hypot(dx, dy), maxD = S * MAX_STRETCH;
+      if (dist > maxD) { tx = ax + dx / dist * maxD; ty = ay + dy / dist * maxD; }
+    }
+    h.x = tx; h.y = ty;
+
+    // ---- つかむ / 離す ----
+    const wasGrip = h.grip;
+    h.grip = inp.grip && !done;
+    if (!inp.grip) h.lock = false;
+    if (h.grip && !h.holding && !h.lock) {
+      if (Math.hypot(h.x - d.x, h.y - d.y) < d.r * 1.1) {
+        // 生地をつかむ（飛んでる途中でもキャッチできる）
+        h.holding = true;
+        h.grabOX = h.x - d.x; h.grabOY = h.y - d.y;
+        d.vx = d.vy = 0; d.moving = false;
+        d.wobble = 0.6;
+        rumble(0.25, 60);
+      } else if (!wasGrip) {
+        // 生地以外をつかんだら：材料をポイっと捨てる
+        const it = items.find(it => !it.got && !it.tossed && Math.hypot(it.x - h.x, it.y - h.y) < it.r * 1.2);
+        if (it) toss(it);
+        h.lock = true;
+      }
+    }
+    if (h.holding && !h.grip) {
+      h.holding = false; h.lock = true;
+      const st = stretchInfo();
+      if (st.k >= MIN_STRETCH) launch(st);
+      else { d.wobble = 0.8; }
+    }
+    h.close += ((h.grip ? 1 : 0) - h.close) * Math.min(1, dt * 18);
+
+    // ---- 生地の移動 ----
+    if (d.moving) {
+      d.x += d.vx * dt; d.y += d.vy * dt;
+      const k = Math.exp(-FRICTION * dt);
+      d.vx *= k; d.vy *= k;
+      d.rot += d.vx * 0.0006 * dt * 60;
+      const pad = d.r * 0.9;
+      let hit = 0;
+      if (d.x < board.x + pad) { d.x = board.x + pad; hit = Math.abs(d.vx); d.vx = Math.abs(d.vx) * BOUNCE; d.squashAng = 0; }
+      if (d.x > board.x + board.w - pad) { d.x = board.x + board.w - pad; hit = Math.abs(d.vx); d.vx = -Math.abs(d.vx) * BOUNCE; d.squashAng = 0; }
+      if (d.y < board.y + pad) { d.y = board.y + pad; hit = Math.abs(d.vy); d.vy = Math.abs(d.vy) * BOUNCE; d.squashAng = Math.PI / 2; }
+      if (d.y > board.y + board.h - pad) { d.y = board.y + board.h - pad; hit = Math.abs(d.vy); d.vy = -Math.abs(d.vy) * BOUNCE; d.squashAng = Math.PI / 2; }
+      if (hit > 150) {
+        d.squash = -Math.min(0.45, hit / 3000);
+        d.wobble = 1;
+        shake = Math.min(14, hit / 160);
+        puff(d.x, d.y, Math.min(30, hit / 60));
+        splats.push({ x: d.x, y: d.y, r: d.r * (0.6 + hit / 4000), a: 0.18 });
+        rumble(Math.min(1, hit / 2500), 80);
+      }
+      const sp = Math.hypot(d.vx, d.vy);
+      if (sp > 200) { d.squash = Math.max(d.squash, Math.min(0.25, sp / 8000)); d.squashAng = Math.atan2(d.vy, d.vx); }
+      if (sp < 25) { d.vx = d.vy = 0; d.moving = false; }
+    }
+    if (h.holding) {
+      const st = stretchInfo();
+      d.squash = st.k * 0.25;
+      d.squashAng = Math.atan2(st.dy, st.dx);
+      // 引っ張り具合で弱く振動
+      if (st.k > 0.3 && Math.random() < dt * 8) rumble(0.05 + st.k * 0.15, 40);
+    } else {
+      d.squash *= Math.exp(-(d.moving ? 6 : 10) * dt);
+    }
+    d.wobble *= Math.exp(-4 * dt);
+    shake *= Math.exp(-12 * dt);
+
+    // ---- 食材 ----
+    if (!done) {
+      itemTimer -= dt;
+      if (itemTimer <= 0 && items.filter(i => !i.tossed).length < MAX_ITEMS) { spawnItem(); itemTimer = ITEM_INTERVAL * (0.7 + Math.random() * 0.6); }
+    }
+    for (const it of items) {
+      it.t += dt;
+      if (it.tossed) {
+        it.x += it.vx * dt; it.y += it.vy * dt; it.vy += 1800 * dt; it.spin += dt * 10; it.tossT += dt;
+      } else if (!it.got && Math.hypot(it.x - d.x, it.y - d.y) < d.r + it.r * 0.6) pickup(it);
+      if (it.got) it.gotT += dt;
+    }
+    items = items.filter(it => it.got ? it.gotT < 0.35 : it.tossed ? it.tossT < 0.8 : it.t < ITEM_LIFE);
+
+    // ---- 完成判定 ----
+    if (!done && count >= GOAL && !d.moving && !h.holding) finish();
+    if (done && !resultShown) {
+      finishTimer += dt;
+      if (finishTimer > 1.2) showResult();
+    }
+
+    for (const p of particles) {
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vx *= 0.92; p.vy *= 0.92; p.life -= dt;
+    }
+    particles = particles.filter(p => p.life > 0);
+    for (const sp of splats) sp.a -= dt * 0.08;
+    splats = splats.filter(s => s.a > 0);
+    for (const p of popups) { p.y -= 40 * dt; p.t += dt; }
+    popups = popups.filter(p => p.t < 1.2);
+  }
+
+  function launch(st) {
+    const d = dough;
+    const power = st.k;
+    d.vx = -st.dx / st.dist * power * MAX_SPEED;
+    d.vy = -st.dy / st.dist * power * MAX_SPEED;
+    d.moving = true;
+    d.wobble = 1;
+    count = Math.min(GOAL, count + 1);
+    score += KNEAD_SCORE;
+    const smooth = count / GOAL;
+    d.lumps = d.lumps.map(v => v * (1 - smooth * 0.5) + Math.random() * (1 - smooth) * 0.5);
+    puff(d.x, d.y, 12);
+    rumble(0.7 * power, 140);
+  }
+
+  function spawnItem() {
+    let def;
+    if (Math.random() < 0.4) def = BAD[Math.random() * BAD.length | 0];
+    else {
+      const pool = GOOD.filter(g => !g.rare || Math.random() < 0.25);
+      def = pool[Math.random() * pool.length | 0];
+    }
+    const r = S * 0.045;
+    const margin = r * 2;
+    let x, y, tries = 0;
+    do {
+      x = board.x + margin + Math.random() * (board.w - margin * 2);
+      y = board.y + margin + Math.random() * (board.h - margin * 2);
+      tries++;
+    } while (tries < 20 && (Math.hypot(x - dough.x, y - dough.y) < dough.r * 2.5 ||
+             items.some(o => Math.hypot(o.x - x, o.y - y) < r * 3)));
+    items.push({ ...def, bad: BAD.includes(def), x, y, r, t: 0, got: false, gotT: 0, tossed: false, tossT: 0, spin: 0 });
+  }
+
+  function toss(it) {
+    it.tossed = true;
+    it.vx = (it.x < W / 2 ? -1 : 1) * (300 + Math.random() * 300);
+    it.vy = -700;
+    popups.push({ x: it.x, y: it.y - it.r, t: 0, text: 'ポイッ', good: !it.bad });
+    rumble(0.15, 40);
+  }
+
+  function pickup(it) {
+    it.got = true;
+    collected.push(it);
+    score += it.s;
+    dough.wobble = 1;
+    const good = !it.bad;
+    popups.push({ x: it.x, y: it.y - it.r, t: 0, text: `${it.n} ${it.s > 0 ? '+' : ''}${it.s}`, good });
+    const col = good ? 'rgba(255,215,120,.9)' : 'rgba(120,80,140,.9)';
+    for (let i = 0; i < 4; i++) dough.specks.push({ a: Math.random() * 7, r: Math.random() * 0.7, c: col });
+    if (it.bad) shake = 10;
+    for (let i = 0; i < 14; i++) {
+      const a = Math.random() * 7, sp = 80 + Math.random() * 200;
+      particles.push({ x: it.x, y: it.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 0.6, r: 2 + Math.random() * 2,
+        col: good ? '255,230,140' : '150,90,170' });
+    }
+    rumble(good ? 0.2 : 0.8, good ? 60 : 200);
+  }
+
+  function rumble(strong, ms) {
+    if (!navigator.getGamepads) return;
+    for (const pad of navigator.getGamepads()) {
+      if (pad && pad.vibrationActuator) {
+        pad.vibrationActuator.playEffect('dual-rumble', { duration: ms, strongMagnitude: strong, weakMagnitude: Math.min(1, strong * 0.7) }).catch(() => {});
+      }
+    }
+  }
+
+  function finish() {
+    done = true;
+    dough.wobble = 1;
+    puff(dough.x, dough.y, 60);
+    for (const it of items) if (!it.got && !it.tossed) it.t = Math.max(it.t, ITEM_LIFE - 0.4);
+  }
+
+  function puff(x, y, n) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, sp = 60 + Math.random() * 260;
+      particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: 0.5 + Math.random() * 0.7, r: 1.5 + Math.random() * 3 });
+    }
+  }
+
+  // ---- 結果画面 ----
+  function showResult() {
+    resultShown = true;
+    const bads = collected.filter(c => c.bad);
+    const goods = collected.filter(c => !c.bad);
+    const sc = Math.max(0, Math.min(100, score));
+    const ok = sc >= PASS;
+    let title, comment;
+    if (ok && sc >= 95) { title = '極上パン！'; comment = 'お店に並べられるレベル。ふわっふわ！'; }
+    else if (ok) { title = 'おいしいパン'; comment = bads.length ? 'ちょっと変な味もするけど…まあ合格！' : 'いい香り。ちゃんとパンだ！'; }
+    else if (bads.length) {
+      const worst = bads.reduce((a, b) => a.s < b.s ? a : b);
+      title = '謎のパン…'; comment = worst.c;
+    } else { title = '味気ないパン'; comment = '材料が足りなかったみたい…'; }
+
+    $('rTag').textContent = ok ? '成功' : '失敗';
+    $('rTag').style.background = ok ? '#e0962f' : '#8a6d5a';
+    $('rTitle').textContent = title;
+    $('rComment').textContent = comment;
+    $('rScore').textContent = `完成度 ${sc} / 100（合格 ${PASS}）`;
+    const list = arr => {
+      const m = new Map();
+      for (const c of arr) m.set(c.n, { e: c.e, n: c.n, k: (m.get(c.n)?.k || 0) + 1 });
+      return [...m.values()].map(v => `${v.e}${v.n}${v.k > 1 ? '×' + v.k : ''}`).join('　');
+    };
+    $('rItems').innerHTML =
+      `こね ${count}回 +${count * KNEAD_SCORE}<br>` +
+      (goods.length ? `入れた材料：${list(goods)}<br>` : '入れた材料：なし<br>') +
+      (bads.length ? `<span class="bad">入っちゃった：${list(bads)}</span>` : '');
+    drawBread(sc, ok, bads);
+    $('result').classList.add('show');
+  }
+
+  function drawBread(sc, ok, bads) {
+    const c = $('bread'), b = c.getContext('2d');
+    b.clearRect(0, 0, c.width, c.height);
+    const cx = 150, cy = 105;
+    const k = 0.55 + sc / 100 * 0.5;
+    const w = 120 * k, h = 70 * k;
+    b.fillStyle = '#e8dccb';
+    b.beginPath(); b.ellipse(cx, cy + h * 0.55, 140, 22, 0, 0, 7); b.fill();
+    const top = ok ? '#c8792b' : '#7a4e2e', mid = ok ? '#e2a04f' : '#9a6a44';
+    const g = b.createLinearGradient(0, cy - h, 0, cy + h * 0.5);
+    g.addColorStop(0, top); g.addColorStop(1, mid);
+    b.fillStyle = g;
+    b.beginPath();
+    b.moveTo(cx - w, cy + h * 0.45);
+    b.bezierCurveTo(cx - w * 1.05, cy - h * 0.9, cx + w * 1.05, cy - h * 0.9, cx + w, cy + h * 0.45);
+    b.closePath(); b.fill();
+    b.strokeStyle = ok ? 'rgba(255,230,170,.8)' : 'rgba(60,35,20,.6)'; b.lineWidth = 5; b.lineCap = 'round';
+    for (let i = -1; i <= 1; i++) {
+      b.beginPath();
+      b.moveTo(cx + i * w * 0.45 - 14, cy - h * 0.25);
+      b.quadraticCurveTo(cx + i * w * 0.45, cy - h * 0.45, cx + i * w * 0.45 + 14, cy - h * 0.2);
+      b.stroke();
+    }
+    b.fillStyle = `rgba(255,255,255,${ok ? 0.25 : 0.08})`;
+    b.beginPath(); b.ellipse(cx - w * 0.35, cy - h * 0.35, w * 0.25, h * 0.1, -0.3, 0, 7); b.fill();
+    b.font = '30px serif'; b.textAlign = 'center'; b.textBaseline = 'middle';
+    b.fillStyle = '#000';
+    bads.slice(0, 5).forEach((it, i) => {
+      const t = (i + 0.5) / Math.min(5, bads.length);
+      const x = cx - w * 0.8 + t * w * 1.6;
+      const y = cy - h * 0.55 + Math.abs(t - 0.5) * h * 0.6;
+      b.save(); b.translate(x, y); b.rotate((i % 2 ? 1 : -1) * 0.35);
+      b.fillText(it.e, 0, 0); b.restore();
+    });
+    if (!ok) {
+      b.strokeStyle = 'rgba(120,110,100,.5)'; b.lineWidth = 3;
+      for (let i = 0; i < 3; i++) {
+        b.beginPath();
+        const x = cx - 30 + i * 30;
+        b.moveTo(x, cy - h - 4);
+        b.bezierCurveTo(x - 10, cy - h - 18, x + 10, cy - h - 28, x, cy - h - 42);
+        b.stroke();
+      }
+    } else {
+      b.fillStyle = '#ffd86b';
+      [[cx - w - 8, cy - h * 0.6], [cx + w + 6, cy - h * 0.8], [cx + w * 0.2, cy - h - 14]].forEach(([x, y]) => {
+        b.beginPath();
+        for (let i = 0; i < 8; i++) { const a = i / 8 * 7, r = i % 2 ? 3 : 10; b.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); }
+        b.fill();
+      });
+    }
+  }
+
+  // ---- 描画 ----
+  function doughColor(smooth) {
+    return [228 + smooth * 22, 205 + smooth * 30, 160 + smooth * 55];
+  }
+
+  function draw() {
+    const t = performance.now() / 1000;
+    ctx.save();
+    if (shake > 0.3) ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake);
+    ctx.drawImage(boardCanvas, 0, 0);
+
+    for (const sp of splats) {
+      ctx.fillStyle = `rgba(255,250,235,${sp.a})`;
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, sp.r, 0, 7); ctx.fill();
+    }
+
+    // 食材
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const it of items) {
+      let a = 1, sc = 1, x = it.x, y = it.y, rot = 0;
+      if (it.got) {
+        const k = it.gotT / 0.35;
+        x += (dough.x - x) * k; y += (dough.y - y) * k; sc = 1 - k; a = 1 - k;
+      } else if (it.tossed) {
+        a = Math.max(0, 1 - it.tossT / 0.8); rot = it.spin;
+      } else {
+        sc = Math.min(1, it.t / 0.25) * (1 + Math.sin(t * 4 + it.x) * 0.05);
+        if (ITEM_LIFE - it.t < 2) a = (Math.sin(t * 20) > 0) ? 1 : 0.35;
+      }
+      ctx.globalAlpha = a;
+      ctx.save(); ctx.translate(x, y + (it.tossed ? 0 : Math.sin(t * 3 + it.y) * 3)); ctx.scale(sc, sc); ctx.rotate(rot);
+      if (!it.tossed) {
+        ctx.fillStyle = 'rgba(60,35,15,.22)';
+        ctx.beginPath(); ctx.ellipse(3, it.r * 0.75, it.r * 0.9, it.r * 0.35, 0, 0, 7); ctx.fill();
+      }
+      ctx.fillStyle = 'rgba(255,250,240,.9)';
+      ctx.beginPath(); ctx.arc(0, 0, it.r, 0, 7); ctx.fill();
+      ctx.fillStyle = '#000';
+      ctx.font = `${it.r * 1.25}px serif`;
+      ctx.fillText(it.e, 0, 2);
+      if (!it.tossed) {
+        ctx.font = `bold ${Math.max(11, it.r * 0.42)}px "Hiragino Sans", sans-serif`;
+        ctx.fillStyle = '#5a3a20';
+        ctx.fillText(it.n, 0, it.r + 12);
+      }
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
+
+    // 狙い線（引っ張り中のみ）
+    if (hand.holding) {
+      const st = stretchInfo();
+      if (st.dist > 1) {
+        const ax = -st.dx / st.dist, ay = -st.dy / st.dist;
+        const len = dough.r * 1.3 + st.k * S * 0.35;
+        const col = st.k >= MIN_STRETCH ? 'rgba(255,255,255,.75)' : 'rgba(255,255,255,.3)';
+        ctx.strokeStyle = col; ctx.fillStyle = col;
+        ctx.lineWidth = 4; ctx.setLineDash([10, 12]);
+        ctx.beginPath(); ctx.moveTo(dough.x + ax * dough.r * 1.2, dough.y + ay * dough.r * 1.2);
+        ctx.lineTo(dough.x + ax * len, dough.y + ay * len); ctx.stroke();
+        ctx.setLineDash([]);
+        const hx = dough.x + ax * len, hy = dough.y + ay * len, an = Math.atan2(ay, ax);
+        ctx.beginPath();
+        ctx.moveTo(hx + Math.cos(an) * 16, hy + Math.sin(an) * 16);
+        ctx.lineTo(hx + Math.cos(an + 2.5) * 14, hy + Math.sin(an + 2.5) * 14);
+        ctx.lineTo(hx + Math.cos(an - 2.5) * 14, hy + Math.sin(an - 2.5) * 14);
+        ctx.fill();
+      }
+    }
+
+    for (const p of particles) {
+      ctx.fillStyle = `rgba(${p.col || '255,253,245'},${Math.min(1, p.life) * 0.8})`;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill();
+    }
+
+    drawDough(dough);
+    if (hand.holding) drawStretch();
+    if (!resultShown) drawHand(hand);
+
+    for (const p of popups) {
+      ctx.globalAlpha = Math.min(1, (1.2 - p.t) * 2);
+      ctx.font = 'bold 22px "Hiragino Maru Gothic ProN", sans-serif';
+      ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(60,30,10,.7)';
+      ctx.strokeText(p.text, p.x, p.y);
+      ctx.fillStyle = p.good ? '#ffe680' : '#ff8a8a';
+      ctx.fillText(p.text, p.x, p.y);
+      ctx.globalAlpha = 1;
+    }
+    ctx.restore();
+
+    const sc = Math.max(0, Math.min(100, score));
+    $('hudText').innerHTML = done
+      ? '🍞 焼き上がり…'
+      : `こね ${count} / ${GOAL}　<span style="font-size:15px">完成度 ${sc}</span>`;
+    $('meterFill').style.width = sc + '%';
+    $('meterLine').style.left = PASS + '%';
+    $('hint').textContent = mode === 'pad'
+      ? 'スティックで手を動かす → トリガーで生地をつかむ → 引っぱって離す！　材料をつかむとポイ捨て'
+      : mode === 'key'
+      ? 'WASD/矢印で手を動かす → スペースでつかむ → 引っぱって離す！'
+      : 'マウスで手を動かす → クリックでつかむ → 引っぱって離す！' + (padSeen ? '' : '（パッドはボタンを一度押すと認識）');
+  }
+
+  // 伸びた生地（つかんだ点 ↔ 手）
+  function drawStretch() {
+    const d = dough, h = hand;
+    const st = stretchInfo();
+    if (st.dist < 2) return;
+    const ang = Math.atan2(st.dy, st.dx);
+    const nx = -Math.sin(ang), ny = Math.cos(ang);
+    // 根元：生地の縁、先端：手
+    const bx = d.x + Math.cos(ang) * d.r * 0.5, by = d.y + Math.sin(ang) * d.r * 0.5;
+    const w0 = d.r * (0.85 - 0.45 * st.k), w1 = d.r * (0.42 - 0.18 * st.k);
+    const mx = (bx + h.x) / 2, my = (by + h.y) / 2;
+    const neck = Math.min(w0, w1) * (1 - 0.45 * st.k); // 真ん中がくびれる
+    const c = doughColor(count / GOAL);
+    ctx.fillStyle = `rgb(${c[0] - 8},${c[1] - 10},${c[2] - 12})`;
+    ctx.beginPath();
+    ctx.moveTo(bx + nx * w0, by + ny * w0);
+    ctx.quadraticCurveTo(mx + nx * neck, my + ny * neck, h.x + nx * w1, h.y + ny * w1);
+    ctx.arc(h.x, h.y, w1, ang - Math.PI / 2, ang + Math.PI / 2);
+    ctx.lineTo(h.x - nx * w1, h.y - ny * w1);
+    ctx.quadraticCurveTo(mx - nx * neck, my - ny * neck, bx - nx * w0, by - ny * w0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(150,105,60,.3)'; ctx.lineWidth = 2; ctx.stroke();
+    // ハイライト
+    ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(bx + nx * w0 * 0.5, by + ny * w0 * 0.5);
+    ctx.quadraticCurveTo(mx + nx * neck * 0.5, my + ny * neck * 0.5, h.x + nx * w1 * 0.5, h.y + ny * w1 * 0.5);
+    ctx.stroke();
+  }
+
+  function drawHand(h) {
+    const S2 = S * 0.055; // 手の大きさ
+    const close = h.close;
+    // 手首は画面下側から伸びてくる向き
+    let ang = -Math.PI / 2;
+    if (h.holding) {
+      const st = stretchInfo();
+      if (st.dist > 4) ang = Math.atan2(-st.dy, -st.dx); // 指先が生地の方を向く
+    }
+    const overDough = Math.hypot(h.x - dough.x, h.y - dough.y) < dough.r * 1.1;
+    ctx.save();
+    ctx.translate(h.x, h.y);
+    ctx.rotate(ang + Math.PI / 2);
+    // 影
+    ctx.fillStyle = 'rgba(40,20,5,.25)';
+    ctx.beginPath(); ctx.ellipse(8, 14, S2 * 1.1, S2 * 0.9, 0, 0, 7); ctx.fill();
+
+    const skin = '#f3c9a1', line = '#b07a52';
+    ctx.lineWidth = 2.5; ctx.strokeStyle = line; ctx.fillStyle = skin;
+    // 手首
+    ctx.beginPath(); ctx.roundRect(-S2 * 0.55, S2 * 0.4, S2 * 1.1, S2 * 1.6, S2 * 0.3); ctx.fill(); ctx.stroke();
+    // 袖
+    ctx.fillStyle = '#f5f5f0';
+    ctx.beginPath(); ctx.roundRect(-S2 * 0.75, S2 * 1.35, S2 * 1.5, S2 * 1.2, S2 * 0.25); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = skin;
+    // 指（開く ↔ 握る）
+    const fingers = [-0.6, -0.2, 0.2, 0.6];
+    fingers.forEach((fx, i) => {
+      const len = S2 * (0.95 - Math.abs(fx) * 0.25) * (1 - close * 0.6);
+      const x = fx * S2 * 0.75;
+      const spread = fx * 0.25 * (1 - close);
+      ctx.save(); ctx.translate(x, -S2 * 0.35); ctx.rotate(spread);
+      ctx.beginPath(); ctx.roundRect(-S2 * 0.17, -len, S2 * 0.34, len + S2 * 0.2, S2 * 0.17); ctx.fill(); ctx.stroke();
+      ctx.restore();
+    });
+    // 手のひら
+    ctx.beginPath(); ctx.ellipse(0, 0, S2 * 0.8, S2 * 0.72, 0, 0, 7); ctx.fill(); ctx.stroke();
+    // 親指
+    ctx.save(); ctx.translate(-S2 * 0.7, S2 * 0.05); ctx.rotate(-0.9 + close * 0.9);
+    ctx.beginPath(); ctx.roundRect(-S2 * 0.18, -S2 * 0.7, S2 * 0.36, S2 * 0.8, S2 * 0.18); ctx.fill(); ctx.stroke();
+    ctx.restore();
+    // 握ってる時の指の折り目
+    if (close > 0.5) {
+      ctx.strokeStyle = 'rgba(150,95,60,.6)'; ctx.lineWidth = 2;
+      for (const fx of [-0.4, 0, 0.4]) {
+        ctx.beginPath(); ctx.moveTo(fx * S2 * 0.75, -S2 * 0.75); ctx.lineTo(fx * S2 * 0.75, -S2 * 0.45); ctx.stroke();
+      }
+    }
+    ctx.restore();
+
+    // つかめる時のリング
+    if (!h.holding && overDough && !done) {
+      const t = performance.now() / 1000;
+      ctx.strokeStyle = `rgba(255,255,255,${0.5 + Math.sin(t * 8) * 0.25})`;
+      ctx.lineWidth = 3; ctx.setLineDash([6, 8]);
+      ctx.beginPath(); ctx.arc(dough.x, dough.y, dough.r * 1.25, 0, 7); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  function drawDough(d) {
+    const t = performance.now() / 1000;
+    const smooth = count / GOAL;
+    ctx.save();
+    ctx.translate(d.x, d.y);
+    ctx.fillStyle = 'rgba(60,35,15,.28)';
+    ctx.beginPath(); ctx.ellipse(6, d.r * 0.35, d.r * 1.05, d.r * 0.75, 0, 0, 7); ctx.fill();
+
+    ctx.rotate(d.squashAng);
+    const sq = d.squash + Math.sin(t * 22) * d.wobble * 0.08;
+    ctx.scale(1 + sq, 1 / (1 + sq));
+    ctx.rotate(-d.squashAng + d.rot);
+
+    const rough = 0.22 * (1 - smooth) + 0.02;
+    const pts = [];
+    for (let i = 0; i < N; i++) {
+      const a = i / N * Math.PI * 2;
+      const lump = (d.lumps[(i - 1 + N) % N] + d.lumps[i] * 2 + d.lumps[(i + 1) % N]) / 4;
+      const rr = d.r * (1 - rough / 2 + lump * rough);
+      pts.push([Math.cos(a) * rr, Math.sin(a) * rr]);
+    }
+    const path = () => {
+      ctx.beginPath();
+      for (let i = 0; i < N; i++) {
+        const p = pts[i], q = pts[(i + 1) % N];
+        const mx = (p[0] + q[0]) / 2, my = (p[1] + q[1]) / 2;
+        i === 0 ? ctx.moveTo(mx, my) : ctx.quadraticCurveTo(p[0], p[1], mx, my);
+      }
+      const p = pts[0], q = pts[1];
+      ctx.quadraticCurveTo(p[0], p[1], (p[0] + q[0]) / 2, (p[1] + q[1]) / 2);
+      ctx.closePath();
+    };
+
+    const c0 = doughColor(smooth);
+    const g = ctx.createRadialGradient(-d.r * 0.3, -d.r * 0.4, d.r * 0.1, 0, 0, d.r * 1.15);
+    g.addColorStop(0, `rgb(${Math.min(255, c0[0] + 20)},${Math.min(255, c0[1] + 22)},${Math.min(255, c0[2] + 25)})`);
+    g.addColorStop(1, `rgb(${c0[0] - 30},${c0[1] - 35},${c0[2] - 40})`);
+    path(); ctx.fillStyle = g; ctx.fill();
+
+    ctx.save(); path(); ctx.clip();
+    const spots = Math.round(40 * (1 - smooth));
+    for (let i = 0; i < spots; i++) {
+      const a = d.lumps[i % N] * 7 + i, rr = d.r * (0.2 + d.lumps[(i * 7) % N] * 0.7);
+      ctx.fillStyle = i % 2 ? 'rgba(255,255,250,.45)' : 'rgba(170,130,80,.18)';
+      ctx.beginPath(); ctx.arc(Math.cos(a) * rr, Math.sin(a) * rr, 2 + (i % 5), 0, 7); ctx.fill();
+    }
+    for (const sp of d.specks) {
+      ctx.fillStyle = sp.c;
+      ctx.beginPath(); ctx.arc(Math.cos(sp.a) * sp.r * d.r, Math.sin(sp.a) * sp.r * d.r, 3, 0, 7); ctx.fill();
+    }
+    ctx.fillStyle = `rgba(255,255,255,${0.1 + smooth * 0.35})`;
+    ctx.beginPath(); ctx.ellipse(-d.r * 0.32, -d.r * 0.38, d.r * 0.35, d.r * 0.18, -0.5, 0, 7); ctx.fill();
+    ctx.restore();
+
+    ctx.strokeStyle = 'rgba(150,105,60,.35)'; ctx.lineWidth = 2;
+    path(); ctx.stroke();
+    ctx.restore();
+  }
+
+  function onResize() {
+    if (!innerWidth || !innerHeight) return;
+    const ox = W, oy = H;
+    resize();
+    if (dough) {
+      dough.x = dough.x / ox * W; dough.y = dough.y / oy * H;
+      dough.r = S * 0.09;
+      hand.x = hand.x / ox * W; hand.y = hand.y / oy * H;
+      for (const it of items) { it.x = it.x / ox * W; it.y = it.y / oy * H; it.r = S * 0.045; }
+    }
+  }
+  addEventListener('resize', onResize);
+  resize();
+  reset();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
