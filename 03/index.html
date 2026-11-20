@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>03 叩きつけ生地 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a1d13; }
+  canvas { display: block; }
+  body { font-family: "Hiragino Maru Gothic ProN", "Hiragino Sans", sans-serif; }
+  #hud {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    font-weight: bold; font-size: 20px; line-height: 1.3;
+    color: #fff8ec; text-shadow: 0 2px 4px rgba(0,0,0,.6); text-align: center;
+    pointer-events: none; white-space: nowrap;
+  }
+  #meter { width: 260px; height: 12px; margin: 6px auto 0; border-radius: 6px;
+    background: rgba(0,0,0,.35); overflow: hidden; position: relative; }
+  #meterFill { height: 100%; width: 0; background: linear-gradient(90deg,#f6c66b,#ffe9a8); transition: width .25s; }
+  #meterLine { position: absolute; top: -2px; bottom: -2px; width: 2px; background: #fff; opacity: .8; }
+  #hint {
+    position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+    font-size: 14px; line-height: 1.5; color: #fff8ecd0; width: 92%;
+    text-shadow: 0 1px 3px rgba(0,0,0,.7); text-align: center; pointer-events: none;
+  }
+  #result {
+    position: fixed; inset: 0; display: none; align-items: center; justify-content: center;
+    background: rgba(40,25,12,.72); backdrop-filter: blur(3px);
+  }
+  #result.show { display: flex; animation: fade .4s ease-out; }
+  @keyframes fade { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: none; } }
+  #card {
+    background: #fff8ec; color: #4a3220; border-radius: 22px; padding: 22px 30px 20px;
+    width: min(440px, 88vw); text-align: center; box-shadow: 0 16px 50px rgba(0,0,0,.5);
+  }
+  #rTag { display: inline-block; padding: 4px 16px; border-radius: 999px; font-weight: bold;
+    font-size: 15px; color: #fff; letter-spacing: 2px; }
+  #rTitle { font-size: 30px; font-weight: bold; margin: 8px 0 2px; }
+  #rComment { font-size: 15px; color: #7a5a40; margin-bottom: 6px; min-height: 1.4em; }
+  #bread { display: block; margin: 4px auto; }
+  #rScore { font-size: 18px; font-weight: bold; margin: 4px 0 8px; }
+  #rItems { font-size: 14px; color: #6a4a30; line-height: 1.7; }
+  #rRetry { margin-top: 12px; font-size: 13px; color: #9a7a5a; }
+</style>
+</head>
+<body>
+<div id="hud"><div id="hudText"></div><div id="meter"><div id="meterFill"></div><div id="meterLine"></div></div></div>
+<div id="hint"></div>
+<div id="result"><div id="card">
+  <div id="rTag"></div>
+  <div id="rTitle"></div>
+  <div id="rComment"></div>
+  <canvas id="bread" width="300" height="170"></canvas>
+  <div id="rScore"></div>
+  <div id="rItems"></div>
+  <div id="rRetry">Aボタン / Rキー / クリック でもう一度</div>
+</div></div>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+const $ = id => document.getElementById(id);
+
+// ---- 調整用パラメータ ----
+const GOAL = 10;            // 叩きつけ回数
+const PASS = 70;            // 合格ライン
+const BW = 8, BD = 5;       // まな板の半分の幅・奥行き
+const R = 1;                // 生地の半径
+const GRAVITY = 32;
+const HAND_SPEED = 10;      // 手の水平移動速度（スティック全開時）
+const HAND_LIFT = 5.5;      // 右スティック上で上がる高さ
+const HAND_FOLLOW = 18;     // 手の上下バネの強さ（大きいほどキビキビ＝強く叩ける）
+const HELD_REST = 0.8;      // 持っている時の手の目標高さ（まな板より下＝打ち付ける勢いが残る）
+const THROW_MUL = 1.25;     // 投げたときに手の速度を何倍で引き継ぐか
+const MAX_THROW = 26;
+const SLAM_MIN = 15;        // これ以上の衝撃速度で「叩きつけ」カウント（ゆっくり置く・落とすだけでは進まない）
+const SLAM_STRONG = 20;     // これ以上で「強」10点（未満は7点）
+const BOUNCE_BASE = 5.5;       // 叩きつけ後に跳ねる横方向の速さ（叩く強さに関係なく一定）
+const BOUNCE_UP = 7;           // 跳ねる上向きの速さ（一定）
+const STICK_DEAD = 0.15;
+
+// ---- three.js 基本 ----
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#2a1d13');
+const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
+const camBase = new THREE.Vector3();
+const camLook = new THREE.Vector3(0, 0, 0.6);
+
+scene.add(new THREE.HemisphereLight('#fff4e0', '#5a3a20', 0.9));
+const sun = new THREE.DirectionalLight('#fff1dc', 1.6);
+sun.position.set(-4, 16, 5);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -12, right: 12, top: 10, bottom: -10, near: 1, far: 40 });
+sun.shadow.radius = 4;
+scene.add(sun);
+
+// ---- 作業台とまな板 ----
+function woodTexture(w, h, base, seed0) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const b = c.getContext('2d');
+  b.fillStyle = base; b.fillRect(0, 0, w, h);
+  let seed = seed0;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 90; i++) {
+    const y0 = rnd() * h, amp = 2 + rnd() * 8, freq = 0.003 + rnd() * 0.008, ph = rnd() * 6;
+    b.strokeStyle = `rgba(${110 + rnd() * 40 | 0},${65 + rnd() * 30 | 0},25,${0.06 + rnd() * 0.14})`;
+    b.lineWidth = 1 + rnd() * 3;
+    b.beginPath();
+    for (let x = 0; x <= w; x += 8) {
+      const y = y0 + Math.sin(x * freq + ph) * amp + Math.sin(x * freq * 3.1) * amp * 0.3;
+      x ? b.lineTo(x, y) : b.moveTo(x, y);
+    }
+    b.stroke();
+  }
+  for (let i = 0; i < 2500; i++) {
+    b.fillStyle = `rgba(255,252,240,${rnd() * 0.22})`;
+    b.beginPath(); b.arc(rnd() * w, rnd() * h, rnd() * 2.2, 0, 7); b.fill();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
+}
+
+const counter = new THREE.Mesh(
+  new THREE.BoxGeometry(60, 1, 40),
+  new THREE.MeshStandardMaterial({ map: woodTexture(1024, 1024, '#6b4a30', 3), roughness: 0.9 })
+);
+counter.position.y = -1.0;  // 上面 y = -0.5
+counter.receiveShadow = true;
+scene.add(counter);
+
+const boardMat = new THREE.MeshStandardMaterial({ map: woodTexture(1600, 1000, '#ddb078', 7), roughness: 0.75 });
+const sideMat = new THREE.MeshStandardMaterial({ color: '#b98650', roughness: 0.8 });
+const board = new THREE.Mesh(new THREE.BoxGeometry(BW * 2, 0.5, BD * 2),
+  [sideMat, sideMat, boardMat, sideMat, sideMat, sideMat]);
+board.position.y = -0.25; // 上面 y = 0
+board.receiveShadow = true; board.castShadow = true;
+scene.add(board);
+
+// ---- 生地 ----
+const doughGeo = new THREE.IcosahedronGeometry(R, 5);
+const basePos = doughGeo.attributes.position.array.slice();
+const colors = new Float32Array(basePos.length);
+doughGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+const doughMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.9 });
+const dough = new THREE.Mesh(doughGeo, doughMat);
+dough.castShadow = true; dough.receiveShadow = true;
+scene.add(dough);
+
+let noiseWaves = [];
+function newNoise() {
+  noiseWaves = Array.from({ length: 9 }, () => {
+    const v = new THREE.Vector3().randomDirection().multiplyScalar(2 + Math.random() * 5);
+    return { k: v, p: Math.random() * 7, a: 0.5 + Math.random() * 0.5 };
+  });
+}
+function shapeDough(smooth) {
+  // こねるほど凸凹が減り、色がなめらかなクリーム色に
+  const pos = doughGeo.attributes.position.array;
+  const amp = 0.14 * (1 - smooth) + 0.012;
+  const c0 = new THREE.Color().setRGB(0.86, 0.76, 0.58).lerp(new THREE.Color().setRGB(0.99, 0.93, 0.80), smooth);
+  for (let i = 0; i < pos.length; i += 3) {
+    const x = basePos[i], y = basePos[i + 1], z = basePos[i + 2];
+    let n = 0;
+    for (const w of noiseWaves) n += Math.sin(x * w.k.x + y * w.k.y + z * w.k.z + w.p) * w.a;
+    n /= 4;
+    const s = 1 + n * amp;
+    pos[i] = x * s; pos[i + 1] = y * s; pos[i + 2] = z * s;
+    const flour = (1 - smooth) * Math.max(0, Math.sin(x * 23 + z * 17) * Math.sin(y * 19 - x * 7)) * 0.6;
+    const shade = 1 + n * 0.06;
+    colors[i] = Math.min(1, c0.r * shade + flour * 0.2);
+    colors[i + 1] = Math.min(1, c0.g * shade + flour * 0.25);
+    colors[i + 2] = Math.min(1, c0.b * shade + flour * 0.35);
+  }
+  doughGeo.attributes.position.needsUpdate = true;
+  doughGeo.attributes.color.needsUpdate = true;
+  doughGeo.computeVertexNormals();
+  doughMat.roughness = 0.92 - smooth * 0.45;
+}
+
+// ---- 手 ----
+const skin = new THREE.MeshStandardMaterial({ color: '#f1c49c', roughness: 0.65 });
+const sleeveMat = new THREE.MeshStandardMaterial({ color: '#f4f2ec', roughness: 0.9 });
+const hand = new THREE.Group();
+const palm = new THREE.Mesh(new THREE.SphereGeometry(0.62, 24, 16), skin);
+palm.scale.set(1, 0.42, 1.05);
+hand.add(palm);
+const fingers = [];
+for (let i = 0; i < 4; i++) {
+  const pivot = new THREE.Group();
+  pivot.position.set(-0.39 + i * 0.26, -0.02, -0.55);
+  const len = [0.42, 0.52, 0.5, 0.38][i];
+  const f = new THREE.Mesh(new THREE.CapsuleGeometry(0.115, len, 6, 12), skin);
+  f.rotation.x = Math.PI / 2; f.position.z = -len / 2 - 0.05;
+  pivot.add(f);
+  hand.add(pivot); fingers.push(pivot);
+}
+const thumbPivot = new THREE.Group();
+thumbPivot.position.set(-0.55, -0.05, -0.05);
+const thumb = new THREE.Mesh(new THREE.CapsuleGeometry(0.13, 0.36, 6, 12), skin);
+thumb.rotation.z = Math.PI / 2; thumb.position.x = -0.25;
+thumbPivot.add(thumb); hand.add(thumbPivot);
+// 腕（手前＝プレイヤー側から低めの角度で伸びる。指は奥向き）
+const armDir = new THREE.Vector3(0.12, 0.42, 1).normalize();
+const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.33, 0.38, 3.2, 16), skin);
+arm.position.copy(armDir.clone().multiplyScalar(1.7)).add(new THREE.Vector3(0, 0, 0.35));
+arm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), armDir);
+hand.add(arm);
+const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.55, 6, 16), sleeveMat);
+sleeve.position.copy(armDir.clone().multiplyScalar(5.9)).add(new THREE.Vector3(0, 0, 0.35));
+sleeve.quaternion.copy(arm.quaternion);
+hand.add(sleeve);
+hand.traverse(o => { if (o.isMesh) { o.castShadow = true; } });
+const handRoot = new THREE.Group();
+handRoot.add(hand);
+scene.add(handRoot);
+
+// 手の真下マーカー（高さが分かるように）
+const marker = new THREE.Mesh(new THREE.RingGeometry(0.45, 0.6, 32),
+  new THREE.MeshBasicMaterial({ color: '#fff', transparent: true, opacity: 0.5, depthWrite: false }));
+marker.rotation.x = -Math.PI / 2; marker.position.y = 0.012;
+scene.add(marker);
+
+// ---- 粉パーティクル ----
+const PN = 400;
+const pPos = new Float32Array(PN * 3).fill(-100);
+const pVel = new Float32Array(PN * 3);
+const pLife = new Float32Array(PN);
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+const pts = new THREE.Points(pGeo, new THREE.PointsMaterial({ color: '#fffaf0', size: 0.12, transparent: true, opacity: 0.85, depthWrite: false }));
+scene.add(pts);
+let pNext = 0;
+function puff(x, y, z, n, power) {
+  for (let i = 0; i < n; i++) {
+    const j = pNext; pNext = (pNext + 1) % PN;
+    const a = Math.random() * Math.PI * 2, sp = (1 + Math.random() * 4) * power;
+    pPos[j * 3] = x + Math.cos(a) * R; pPos[j * 3 + 1] = y; pPos[j * 3 + 2] = z + Math.sin(a) * R;
+    pVel[j * 3] = Math.cos(a) * sp; pVel[j * 3 + 1] = 1 + Math.random() * 3 * power; pVel[j * 3 + 2] = Math.sin(a) * sp;
+    pLife[j] = 0.6 + Math.random() * 0.8;
+  }
+}
+
+// 粉の跡
+const splats = [];
+const splatGeo = new THREE.CircleGeometry(1, 28);
+function addSplat(x, z, size) {
+  const m = new THREE.Mesh(splatGeo, new THREE.MeshBasicMaterial({ color: '#fffaf0', transparent: true, opacity: 0.2, depthWrite: false }));
+  m.rotation.x = -Math.PI / 2; m.position.set(x, 0.005 + splats.length * 0.0005, z);
+  m.scale.setScalar(size);
+  scene.add(m); splats.push(m);
+}
+
+// ---- 状態 ----
+const d = { pos: new THREE.Vector3(), vel: new THREE.Vector3(), held: false, airborne: false, s: 0, sv: 0, rotY: 0 };
+const h = { pos: new THREE.Vector3(), prev: new THREE.Vector3(), vel: new THREE.Vector3(), grip: false, lock: false, close: 0, lift: 0, vy: 0, lockT: 0 };
+let slams, score, done, fell, endT, resultShown, shake, lastLabel;
+
+// 落ちた生地は作業台にしばらく残す
+const fallen = [];
+function respawn() {
+  const g = dough.clone();
+  g.geometry = doughGeo.clone();
+  g.material = doughMat.clone();
+  scene.add(g); fallen.push(g);
+  if (fallen.length > 4) scene.remove(fallen.shift());
+  reset(true);
+}
+
+function reset(drop = false) {
+  if (!drop) { for (const f of fallen) scene.remove(f); fallen.length = 0; }
+  d.pos.set(0, drop ? 9 : R, 0); d.vel.set(0, 0, 0); d.held = false; d.airborne = false;
+  d.contact = !drop; d.dropping = drop; d.s = 0; d.sv = 0;
+  if (!drop) { h.pos.set(0, 2.4, 2.2); h.prev.copy(h.pos); h.vel.set(0, 0, 0); h.vy = 0; }
+  h.grip = false; h.lock = drop; h.lockT = 0;
+  slams = []; score = 0; done = false; fell = false; endT = 0; resultShown = false; shake = 0;
+  for (const s of splats) scene.remove(s); splats.length = 0;
+  newNoise(); shapeDough(0);
+  $('result').classList.remove('show');
+}
+
+// ---- 入力 ----
+let mode = 'mouse', padSeen = false, lastA = false;
+const mouse = { ndc: new THREE.Vector2(), has: false, left: false, right: false };
+const keys = new Set();
+const ray = new THREE.Raycaster();
+const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('pointermove', e => {
+  mouse.ndc.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  mouse.has = true; mode = 'mouse';
+});
+renderer.domElement.addEventListener('pointerdown', e => {
+  mode = 'mouse';
+  if (e.button === 2) mouse.right = true; else mouse.left = true;
+});
+addEventListener('pointerup', e => { if (e.button === 2) mouse.right = false; else mouse.left = false; });
+addEventListener('keydown', e => {
+  if (e.key === 'r' || e.key === 'R') { reset(); return; }
+  keys.add(e.code);
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyK'].includes(e.code)) mode = 'key';
+  if (e.code === 'Space') e.preventDefault();
+});
+addEventListener('keyup', e => keys.delete(e.code));
+$('result').addEventListener('click', () => { if (resultShown) reset(); });
+
+function readInput() {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  for (const p of pads) {
+    if (!p) continue;
+    padSeen = true;
+    const btn = i => p.buttons[i] ? (p.buttons[i].value || (p.buttons[i].pressed ? 1 : 0)) : 0;
+    const a = btn(0) > 0.5;
+    if (a && !lastA && resultShown) reset();
+    lastA = a;
+    let lx = p.axes[0] || 0, ly = p.axes[1] || 0, ry = p.axes[3] || 0;
+    const trig = Math.max(btn(7), btn(6), btn(5), btn(4)) > 0.35;
+    if (Math.hypot(lx, ly) > STICK_DEAD || Math.abs(ry) > STICK_DEAD || trig) mode = 'pad';
+    if (mode === 'pad') {
+      if (Math.hypot(lx, ly) < STICK_DEAD) lx = ly = 0;
+      if (Math.abs(ry) < STICK_DEAD) ry = 0;
+      return { type: 'vel', x: lx, z: ly, lift: -ry, grip: trig };
+    }
+  }
+  if (mode === 'key') {
+    let x = 0, z = 0;
+    if (keys.has('ArrowLeft') || keys.has('KeyA')) x -= 1;
+    if (keys.has('ArrowRight') || keys.has('KeyD')) x += 1;
+    if (keys.has('ArrowUp') || keys.has('KeyW')) z -= 1;
+    if (keys.has('ArrowDown') || keys.has('KeyS')) z += 1;
+    const m = Math.hypot(x, z) || 1;
+    return { type: 'vel', x: x / m, z: z / m, lift: keys.has('Space') ? 1 : 0, grip: keys.has('KeyK') };
+  }
+  let tx = h.pos.x, tz = h.pos.z;
+  if (mouse.has) {
+    ray.setFromCamera(mouse.ndc, camera);
+    const hit = new THREE.Vector3();
+    if (ray.ray.intersectPlane(groundPlane, hit)) { tx = hit.x; tz = hit.z; }
+  }
+  return { type: 'pos', x: tx, z: tz, lift: (mouse.right || keys.has('Space')) ? 1 : 0, grip: mouse.left };
+}
+
+// ---- 更新 ----
+function update(dt, inp) {
+  // 手の水平移動
+  if (inp.type === 'vel') {
+    h.pos.x += inp.x * HAND_SPEED * dt;
+    h.pos.z += inp.z * HAND_SPEED * dt;
+  } else {
+    const k = 1 - Math.exp(-dt * 20);
+    h.pos.x += (inp.x - h.pos.x) * k;
+    h.pos.z += (inp.z - h.pos.z) * k;
+  }
+  h.pos.x = THREE.MathUtils.clamp(h.pos.x, -BW - 0.5, BW + 0.5);
+  h.pos.z = THREE.MathUtils.clamp(h.pos.z, -BD - 0.5, BD + 0.5);
+
+  // 手の高さ：ニュートラルは生地のすぐ上。右スティック上で持ち上げ、下で押しつけ
+  // バネで動かす：持っている時は目標が「まな板の下」にあるので、
+  // 高く持ち上げてから一気に戻すほど速度が乗って強く叩きつけられる。ゆっくり下ろすと弱い。
+  const lift = Math.max(0, inp.lift);
+  const targetY = d.held
+    ? HELD_REST + lift * (HAND_LIFT + 2 * R - HELD_REST)
+    : 2 * R + 0.45 + lift * HAND_LIFT + Math.min(0, inp.lift) * 0.5;
+  const hAcc = HAND_FOLLOW * HAND_FOLLOW * (targetY - h.pos.y) - 2 * 0.8 * HAND_FOLLOW * h.vy;
+  h.vy += hAcc * dt;
+  h.pos.y += h.vy * dt;
+  if (!d.held && h.pos.y < 0.45) { h.pos.y = 0.45; h.vy = Math.max(0, h.vy); }
+
+  // つかむ / 離す
+  h.grip = inp.grip && !done;
+  if (h.lockT > 0) { h.lockT -= dt; if (h.lockT <= 0) h.lock = false; }
+  if (!inp.grip) h.lock = false;
+  const top = d.pos.y + R;
+  const near = Math.hypot(h.pos.x - d.pos.x, h.pos.z - d.pos.z) < R * 1.2 && h.pos.y - top < 1.2 && h.pos.y - d.pos.y > -0.5;
+  if (h.grip && !d.held && !h.lock && near && !fell) {
+    d.held = true; d.vel.set(0, 0, 0);
+    rumble(0.25, 60);
+  } else if (h.grip && !d.held && !near) {
+    // 空振りしたら、一度離すまで掴まない（押しっぱなしで飛んでる生地をキャッチはOK）
+  }
+  if (d.held && !h.grip) {
+    d.held = false; h.lock = true;
+    // 投げ：手の速度を引き継ぐ
+    d.vel.copy(h.vel).multiplyScalar(THROW_MUL);
+    if (d.vel.length() > MAX_THROW) d.vel.setLength(MAX_THROW);
+  }
+
+  // 手の速度
+  const inst = h.pos.clone().sub(h.prev).divideScalar(Math.max(dt, 1e-4));
+  h.vel.lerp(inst, 1 - Math.exp(-dt * 25));
+  h.prev.copy(h.pos);
+
+  // 生地
+  const old = d.pos.clone();
+  if (d.held) {
+    const k = 1 - Math.exp(-dt * 35);
+    d.pos.x += (h.pos.x - d.pos.x) * k;
+    d.pos.z += (h.pos.z - d.pos.z) * k;
+    d.pos.y = h.pos.y - R; // 上下は手と一体（叩きつけの速度をそのまま伝える）
+    d.vel.copy(d.pos).sub(old).divideScalar(Math.max(dt, 1e-4));
+  } else if (!fell) {
+    d.vel.y -= GRAVITY * dt;
+    d.pos.addScaledVector(d.vel, dt);
+  } else {
+    d.vel.y -= GRAVITY * dt;
+    d.pos.addScaledVector(d.vel, dt);
+  }
+
+  const onBoard = Math.abs(d.pos.x) < BW && Math.abs(d.pos.z) < BD;
+  if (!fell) {
+    if (d.pos.y - R > 0.6) d.airborne = true;
+    if (d.pos.y > R + 0.05) d.contact = false;
+    if (onBoard && d.pos.y < R) {
+      const impact = -d.vel.y;
+      d.pos.y = R;
+      const wasHeld = d.held;
+      const bounced = impact > 2 && !d.contact ? hitBoard(impact) : false;
+      if (bounced) {
+        // すっぽ抜けて跳ねた：手はまな板で止める、生地は跳ねた速度のまま
+        h.pos.y = R * 2; h.vy = Math.max(0, h.vy);
+      } else {
+        d.contact = true;
+        if (wasHeld) {
+          d.vel.y = 0;
+          h.pos.y = d.pos.y + R; h.vy = Math.max(0, h.vy); // 手もまな板で止まる
+        } else {
+          d.vel.y = impact > 5 ? impact * 0.15 : 0;
+          const f = Math.exp(-dt * 7);
+          d.vel.x *= f; d.vel.z *= f;
+        }
+      }
+    } else if (!onBoard && !d.held && d.pos.y < R * 0.6) {
+      // まな板から外れて落ちた
+      fell = true; done = true; endT = 0;
+      rumble(1, 400);
+    }
+  } else if (d.pos.y < -0.5 + R) {
+    // 作業台に落下
+    const impact = -d.vel.y;
+    d.pos.y = -0.5 + R;
+    d.vel.multiplyScalar(0.3); d.vel.y = 0;
+    if (impact > 3) { d.s = 0.5; puff(d.pos.x, -0.5, d.pos.z, 30, 1); shake = 0.3; }
+  }
+  if (d.vel.lengthSq() > 0.01 && !d.held) d.rotY += d.vel.x * dt * 0.4;
+
+  // つぶれのバネ
+  const rest = d.held && d.pos.y > R + 0.1 ? -0.12 : 0;
+  const acc = -320 * (d.s - rest) - 13 * d.sv;
+  d.sv += acc * dt; d.s += d.sv * dt;
+  d.s = THREE.MathUtils.clamp(d.s, -0.4, 0.62);
+
+  // 完成判定
+  if (!done && slams.length >= GOAL) {
+    endT += dt;
+    if (endT > 0.6) { done = true; endT = 0; }
+  }
+  if (done) {
+    if (d.held && !fell) { d.held = false; d.vel.set(0, 0, 0); }
+    endT += dt;
+    if (fell) { if (endT > 0.9) respawn(); }   // 落ちたらモーダルなしですぐ次の生地
+    else if (!resultShown && endT > 1.6) showResult();
+  }
+
+  // 粉
+  for (let j = 0; j < PN; j++) {
+    if (pLife[j] <= 0) continue;
+    pLife[j] -= dt;
+    pVel[j * 3 + 1] -= 9 * dt;
+    pPos[j * 3] += pVel[j * 3] * dt; pPos[j * 3 + 1] += pVel[j * 3 + 1] * dt; pPos[j * 3 + 2] += pVel[j * 3 + 2] * dt;
+    if (pPos[j * 3 + 1] < 0.02) { pPos[j * 3 + 1] = 0.02; pVel[j * 3] *= 0.5; pVel[j * 3 + 2] *= 0.5; pVel[j * 3 + 1] = 0; }
+    if (pLife[j] <= 0) pPos[j * 3 + 1] = -100;
+  }
+  pGeo.attributes.position.needsUpdate = true;
+  for (const s of splats) s.material.opacity = Math.max(0.08, s.material.opacity - dt * 0.02);
+
+  shake *= Math.exp(-dt * 10);
+  h.close += ((h.grip ? 1 : 0) - h.close) * (1 - Math.exp(-dt * 18));
+}
+
+function hitBoard(impact) {
+  if (d.dropping) {
+    // 新しい生地が降ってきた着地はカウントしない
+    d.dropping = false; d.airborne = false;
+    d.s = Math.min(0.62, impact / 28); d.sv = 0;
+    puff(d.pos.x, 0.05, d.pos.z, 40, 1);
+    shake = 0.25;
+    rumble(0.5, 120);
+    return;
+  }
+  // 叩きつけ判定：手で持ったまま強く打ち付けた時だけ進む（落とす・置くだけでは進まない）
+  const counts = d.held && impact >= SLAM_MIN && d.airborne && !done && slams.length < GOAL;
+  d.s = Math.min(0.62, impact / (counts ? 34 : 60));
+  d.sv = 0;
+  const power = counts ? Math.min(1.6, impact / 16) : Math.min(0.5, impact / 40);
+  puff(d.pos.x, 0.05, d.pos.z, Math.round(counts ? 15 + impact * 3 : impact * 1.5), power);
+  shake = counts ? Math.min(0.5, impact / 55) : 0;
+  rumble(counts ? Math.min(1, impact / 22) : Math.min(0.25, impact / 60), counts ? 60 + impact * 6 : 50);
+  if (counts) {
+    d.airborne = false;
+    const pts = impact < SLAM_STRONG ? 7 : 10;
+    const label = impact < SLAM_STRONG ? '中' : '強';
+    slams.push({ impact, pts, label });
+    score += pts;
+    addSplat(d.pos.x, d.pos.z, 0.7 + impact / 30);
+    shapeDough(slams.length / GOAL);
+    if (bounceAway(impact)) return true;
+  } else if (impact >= 3) {
+    d.airborne = false;
+  }
+}
+
+// 強く叩きつけると、生地が手からすっぽ抜けてランダムな方向に跳ねる
+// 跳ねる強さは常に一定（方向だけランダム）
+function bounceAway(impact) {
+  if (slams.length >= GOAL) return false; // 最後の一回はその場で
+  const ang = Math.random() * Math.PI * 2;
+  const sp = BOUNCE_BASE;
+  d.held = false;
+  h.lock = true; h.lockT = 0.35; // 少しの間つかめない（押しっぱなしならその後キャッチ可）
+  d.vel.set(Math.cos(ang) * sp, BOUNCE_UP, Math.sin(ang) * sp);
+  d.pos.y = R + 0.02;
+  d.contact = false;
+  return true;
+}
+
+function rumble(strong, ms) {
+  if (!navigator.getGamepads) return;
+  for (const pad of navigator.getGamepads()) {
+    if (pad && pad.vibrationActuator) {
+      pad.vibrationActuator.playEffect('dual-rumble', { duration: ms, strongMagnitude: strong, weakMagnitude: Math.min(1, strong * 0.7) }).catch(() => {});
+    }
+  }
+}
+
+// ---- 描画同期 ----
+function sync(t) {
+  dough.position.copy(d.pos);
+  const sy = 1 - d.s, sxz = 1 + d.s * 0.75;
+  dough.scale.set(sxz, sy, sxz);
+  dough.position.y = d.pos.y - R * (1 - sy) * (d.pos.y <= R + 0.01 ? 1 : 0);
+  dough.rotation.y = d.rotY;
+
+  handRoot.position.copy(h.pos);
+  if (d.held) handRoot.position.y = Math.max(h.pos.y, dough.position.y + R * sy * 0.95);
+  const c = h.close;
+  fingers.forEach((f, i) => { f.rotation.x = -0.15 + c * (d.held ? 1.1 : 1.6); f.rotation.y = (i - 1.5) * 0.12 * (1 - c); });
+  thumbPivot.rotation.y = 0.4 - c * 0.7;
+  thumbPivot.rotation.z = c * 0.6;
+  hand.rotation.x = -0.15 - c * 0.15;
+
+  marker.position.x = h.pos.x; marker.position.z = h.pos.z;
+  const nearD = !d.held && Math.hypot(h.pos.x - d.pos.x, h.pos.z - d.pos.z) < R * 1.2;
+  marker.material.color.set(nearD ? '#ffe680' : '#ffffff');
+  marker.material.opacity = 0.35 + 0.25 * Math.sin(t * 6) * (nearD ? 1 : 0.3);
+  marker.visible = !resultShown;
+
+  camera.position.copy(camBase);
+  if (shake > 0.01) camera.position.add(new THREE.Vector3((Math.random() - .5) * shake, (Math.random() - .5) * shake, 0));
+  camera.lookAt(camLook);
+}
+
+// ---- 結果 ----
+function showResult() {
+  resultShown = true;
+  const sc = fell ? 0 : Math.min(100, score);
+  const ok = !fell && sc >= PASS;
+  const cnt = l => slams.filter(s => s.label === l).length;
+  let title, comment;
+  if (fell) { title = 'まな板から落ちた…'; comment = `作業台にべちゃっ。（${slams.length}回目まで叩いた）`; }
+  else if (sc >= 95) { title = '極上パン！'; comment = '力強い叩きつけでグルテンばっちり！'; }
+  else if (ok) { title = 'おいしいパン'; comment = 'しっかりコシのある生地になった！'; }
+  else { title = 'ぺちゃんこパン'; comment = 'もっと高く持ち上げて、強く叩きつけよう'; }
+  $('rTag').textContent = ok ? '成功' : '失敗';
+  $('rTag').style.background = ok ? '#e0962f' : '#8a6d5a';
+  $('rTitle').textContent = title;
+  $('rComment').textContent = comment;
+  $('rScore').textContent = fell ? '完成度 0 / 100（落下）' : `完成度 ${sc} / 100（合格 ${PASS}）`;
+  $('rItems').innerHTML = `強い叩きつけ ×${cnt('強')}　ふつう ×${cnt('中')}`;
+  if (fell) drawSplat(); else drawBread(sc, ok);
+  $('result').classList.add('show');
+}
+
+function drawSplat() {
+  const c = $('bread'), b = c.getContext('2d');
+  b.clearRect(0, 0, c.width, c.height);
+  b.fillStyle = '#6b5544'; b.fillRect(0, 120, c.width, 50);
+  b.fillStyle = '#efdcb8';
+  b.beginPath();
+  for (let i = 0; i <= 24; i++) {
+    const a = i / 24 * Math.PI * 2, r = 1 + Math.sin(a * 5) * 0.15 + Math.sin(a * 3 + 1) * 0.1;
+    b.lineTo(150 + Math.cos(a) * 90 * r, 128 + Math.sin(a) * 22 * r);
+  }
+  b.fill();
+  b.font = '34px serif'; b.textAlign = 'center'; b.fillStyle = '#000';
+  b.fillText('💥', 238, 100);
+}
+
+function drawBread(sc, ok) {
+  const c = $('bread'), b = c.getContext('2d');
+  b.clearRect(0, 0, c.width, c.height);
+  const cx = 150, cy = 105, k = 0.55 + sc / 100 * 0.5, w = 120 * k, hh = 70 * k;
+  b.fillStyle = '#e8dccb';
+  b.beginPath(); b.ellipse(cx, cy + hh * 0.55, 140, 22, 0, 0, 7); b.fill();
+  const g = b.createLinearGradient(0, cy - hh, 0, cy + hh * 0.5);
+  g.addColorStop(0, ok ? '#c8792b' : '#9a7a55'); g.addColorStop(1, ok ? '#e2a04f' : '#c4a47c');
+  b.fillStyle = g;
+  b.beginPath();
+  b.moveTo(cx - w, cy + hh * 0.45);
+  b.bezierCurveTo(cx - w * 1.05, cy - hh * 0.9, cx + w * 1.05, cy - hh * 0.9, cx + w, cy + hh * 0.45);
+  b.closePath(); b.fill();
+  b.strokeStyle = ok ? 'rgba(255,230,170,.8)' : 'rgba(60,35,20,.4)'; b.lineWidth = 5; b.lineCap = 'round';
+  for (let i = -1; i <= 1; i++) {
+    b.beginPath();
+    b.moveTo(cx + i * w * 0.45 - 14, cy - hh * 0.25);
+    b.quadraticCurveTo(cx + i * w * 0.45, cy - hh * 0.45, cx + i * w * 0.45 + 14, cy - hh * 0.2);
+    b.stroke();
+  }
+  if (ok) {
+    b.fillStyle = '#ffd86b';
+    [[cx - w - 8, cy - hh * 0.6], [cx + w + 6, cy - hh * 0.8], [cx + w * 0.2, cy - hh - 14]].forEach(([x, y]) => {
+      b.beginPath();
+      for (let i = 0; i < 8; i++) { const a = i / 8 * 7, r = i % 2 ? 3 : 10; b.lineTo(x + Math.cos(a) * r, y + Math.sin(a) * r); }
+      b.fill();
+    });
+  }
+}
+
+// ---- HUD ----
+function hud() {
+  const sc = Math.min(100, score);
+  $('hudText').innerHTML = done && !fell ? '🍞 焼き上がり…'
+    : `叩きつけ ${slams.length} / ${GOAL}　<span style="font-size:15px">完成度 ${sc}</span>`;
+  $('meterFill').style.width = sc + '%';
+  $('meterLine').style.left = PASS + '%';
+  $('hint').innerHTML = mode === 'pad'
+    ? '左スティック：手を動かす　トリガー：つかむ　右スティック↑：持ち上げる → 離して叩きつけ！<br>強く叩きつけると生地が跳ねて逃げる。追いかけてつかみ直そう（まな板から落とすとやり直し）'
+    : mode === 'key'
+    ? 'WASD：手を動かす　K：つかむ　スペース：持ち上げる → 離して叩きつけ！<br>強く叩きつけると生地が跳ねて逃げる。追いかけてつかみ直そう（まな板から落とすとやり直し）'
+    : 'マウス：手を動かす　左クリック長押し：つかむ　右クリック/スペース長押し：持ち上げる → 離して叩きつけ！<br>強く叩きつけると生地が跳ねて逃げる。追いかけてつかみ直そう（まな板から落とすとやり直し）'
+      + (padSeen ? '' : '<br>（パッドはボタンを一度押すと認識）');
+}
+
+// ---- リサイズ ----
+function resize() {
+  const w = Math.max(1, innerWidth), hgt = Math.max(1, innerHeight);
+  renderer.setSize(w, hgt);
+  camera.aspect = w / hgt;
+  camera.updateProjectionMatrix();
+  // 縦長画面ほどカメラを引く
+  const k = Math.max(1, 1.5 / camera.aspect);
+  camBase.set(0, 13 * k, 9.5 * k);
+}
+addEventListener('resize', resize);
+resize();
+reset();
+
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.033, (now - last) / 1000);
+  last = now;
+  if (renderer.domElement.width !== Math.round(innerWidth * renderer.getPixelRatio())) resize();
+  update(dt, readInput());
+  sync(now / 1000);
+  hud();
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
