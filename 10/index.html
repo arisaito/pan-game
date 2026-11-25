@@ -116,7 +116,7 @@ const CFG = {
   reachKick: 0.9,             // 腕を急に伸ばした反動
   twistTorque: 5.0,           // ひねると横に振られる強さ
   twistKick: 1.2,             // 急にひねった反動
-  reach0: 7.0, reach1: 2.4,   // 腕の届く距離（ふだん ± 右スティック上下）
+  reach0: 7.0, reach1: 3.4,   // 腕の届く距離（ふだん ± 右スティック上下）。奥の端まで届く
   leanReach: 2.6,             // 前に傾くと手がさらに奥へ
   inward: 0.6,                // 手は肩より少し内側（ふだんは生地の左右の端の上）
   elbowOut: 0.55,             // ひじの張り出し
@@ -128,7 +128,8 @@ const CFG = {
   handOffset: 0.5,
   handK: 80, handD: 8,        // ぶら下がった手のバネ
   contactR: 0.75,             // 手のひらが生地に触れる半径
-  stick: 0.7,                 // 押さえながらゆっくり動かした時、生地が手についてくる割合
+  stick: 0.95,                // トリガーでつかんでゆっくり動かした時、生地が手についてくる割合
+  gripWiden: 0.45,            // つかむと手のひらが生地をとらえる範囲が広がる
   stickLight: 0.08,           // 押さえていない時（軽く触れているだけ）
   hitSpeed: 8,                // 手がこれより速いと、生地を弾く（ふつうに体を動かすくらいでは弾かない）
   hitK: 0.7,                  // 弾く強さ
@@ -441,7 +442,7 @@ const hands = [0, 1].map(i => {
     i, side, S: new THREE.Vector3(), Snow: new THREE.Vector3(), fwd: new THREE.Vector3(0, 0, -1),
     elbow: new THREE.Vector3(), wrist: new THREE.Vector3(), d: new THREE.Vector3(),
     pos, prev: pos.clone(), vel: new THREE.Vector3(), hv: new THREE.Vector3(), vy: 0, speed: 0, contact: false,
-    dmx: 0, dmz: 0, press: 0, grip: false, holding: null, grabY: 0, close: 0.15, model: makeHandModel(i), arm: makeArmModel(i),
+    dmx: 0, dmz: 0, press: 0, gripAmt: 0, grip: false, holding: null, grabY: 0, close: 0.15, model: makeHandModel(i), arm: makeArmModel(i),
   };
 });
 
@@ -609,6 +610,8 @@ function updateHands(dt) {
     // 体重のかけ方：トリガー × 前傾
     const weight = CFG.pressBase + (1 - CFG.pressBase) * THREE.MathUtils.clamp(B.fz / CFG.leanFwd, 0, 1);
     h.press += (THREE.MathUtils.clamp(n.grip, 0, 1) * weight - h.press) * Math.min(1, dt * 14);
+    // つかむ強さ：トリガーの深さそのまま（体重に関係なく、生地をしっかりつかんで引き寄せられる）
+    h.gripAmt += (THREE.MathUtils.clamp(n.grip, 0, 1) - h.gripAmt) * Math.min(1, dt * 14);
 
     // ---- 手：腕の先にぶら下がるバネ。急に動かすと行き過ぎて揺れる ----
     h.hv.x += (CFG.handK * (target.x - h.pos.x) - CFG.handD * h.hv.x) * dt;
@@ -662,10 +665,11 @@ function updateHands(dt) {
 //   ゆっくり → 手の下の生地が手についていく（ずれずに一緒に動く＝こねる）
 //   速い     → 生地を弾く（手の勢いが生地に乗って飛んでいく）
 function handPush() {
-  const R = CFG.contactR, dt = 1 / 60, it = CFG.iterations;
+  const dt = 1 / 60, it = CFG.iterations;
   let hit = 0;
   for (const h of hands) {
     const fast = Math.max(0, h.speed - CFG.hitSpeed);
+    const R = CFG.contactR + h.gripAmt * CFG.gripWiden; // つかむと手のひらが広く生地をとらえる
     for (const pt of parts) {
       const dx = pt.p.x - h.pos.x, dz = pt.p.z - h.pos.z;
       if (dx > R || dx < -R || dz > R || dz < -R) continue;
@@ -673,8 +677,10 @@ function handPush() {
       if (d >= R || pt.p.y > h.pos.y + 0.3) continue;
       const wgt = 1 - d / R; // 手のひらの真ん中ほど強く
       if (fast <= 0) {
-        // 押さえているほど生地が手についてくる（位置だけずらす＝勢いはつけない）
-        const f = (CFG.stickLight + (CFG.stick - CFG.stickLight) * h.press) * wgt / it;
+        // トリガーでつかんでいるほど生地が手についてくる（位置だけずらす＝勢いはつけない）
+        //   → 奥へ行った生地も、つかんで手前に引き戻せる
+        const g = Math.max(h.gripAmt, h.press);
+        const f = (CFG.stickLight + (CFG.stick - CFG.stickLight) * g) * (0.45 + 0.55 * wgt) / it;
         pt.p.x += h.d.x * f; pt.p.z += h.d.z * f;
         pt.q.x += h.d.x * f; pt.q.z += h.d.z * f;
         // 手のひらで上から押さえる
@@ -1018,7 +1024,7 @@ function hud(now) {
   tip.textContent = failing ? '失敗… 新しい生地が来るよ'
     : overT > 0 ? 'ちぎれる！ ゆるめて！'
     : spawning ? '新しい生地…'
-    : hands.some(h => h.press > 0.3 && h.contact && (h.pullT || 0) > 0.25) ? '押さえたまま引くと生地が引きずられる！ 戻す時は力を抜いて'
+    : hands.some(h => h.gripAmt > 0.3 && h.contact && (h.pullT || 0) > 0.25) ? 'つかんで引き寄せ中（こねは進まない）。こねる時は奥へ押し出す'
     : '押さえて奥へ押し出す → 力を抜いて戻す。右スティックでも体が揺れる！';
   const t = startTime === null ? 0 : (done ? endTime : now) - startTime;
   $('stat').textContent = (fails ? '失敗 ' + fails + '　' : '') + '⏱ ' + fmtTime(t);
