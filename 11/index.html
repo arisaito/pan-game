@@ -1,0 +1,625 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11 生地になって旅をする 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a1d13; }
+  canvas { display: block; }
+  body { font-family: "Hiragino Maru Gothic ProN", "Hiragino Sans", system-ui, sans-serif; color: #fff3e0; }
+  #panel {
+    position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+    width: min(460px, calc(100vw - 40px)); padding: 10px 16px 8px; border-radius: 12px;
+    background: rgba(40,25,15,.6); pointer-events: none;
+  }
+  #row1 { display: flex; justify-content: space-between; align-items: baseline; font-weight: bold; }
+  #bar { position: relative; height: 14px; border-radius: 7px; background: rgba(0,0,0,.35); margin: 6px 0; overflow: hidden; }
+  #barFill { height: 100%; width: 0; background: linear-gradient(90deg,#d8c39a,#f4d28a,#ffb347); }
+  .cp { position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(255,255,255,.55); }
+  #row2 { display: flex; justify-content: space-between; font-size: 12px; }
+  #tip.warn { color: #ff9b80; }
+  #gauge {
+    position: fixed; top: 96px; left: 50%; transform: translateX(-50%);
+    width: min(320px, calc(100vw - 60px)); padding: 6px 10px; border-radius: 10px;
+    background: rgba(40,25,15,.6); pointer-events: none; font-size: 11px;
+  }
+  #gBar { position: relative; height: 10px; border-radius: 5px; overflow: hidden;
+    background: linear-gradient(90deg, rgba(130,210,90,.8) 0 60%, rgba(255,190,70,.85) 60% 85%, rgba(230,70,50,.9) 85%); }
+  #gNeedle { position: absolute; top: -2px; bottom: -2px; width: 4px; margin-left: -2px; background: #fff; box-shadow: 0 0 4px #000; }
+  #gauge.danger { animation: blink .12s infinite alternate; }
+  @keyframes blink { to { background: rgba(160,30,20,.75); } }
+  #pops { position: fixed; inset: 0; pointer-events: none; }
+  .pop {
+    position: absolute; transform: translate(-50%, -50%); font-weight: 900; white-space: nowrap;
+    text-shadow: 0 0 6px rgba(40,20,10,.9), 0 2px 0 rgba(40,20,10,.9); animation: pop 1.2s ease-out forwards;
+  }
+  @keyframes pop {
+    0% { opacity: 1; transform: translate(-50%, -50%) scale(1.4); }
+    12% { transform: translate(-50%, -50%) scale(1); }
+    70% { opacity: 1; }
+    100% { opacity: 0; transform: translate(-50%, -110%) scale(1); }
+  }
+  /* 左右の端（出っ張り）の状態 */
+  .lobe { position: fixed; bottom: 86px; width: 92px; padding: 6px; border-radius: 10px; text-align: center;
+    background: rgba(40,25,15,.6); font-size: 12px; font-weight: bold; pointer-events: none; }
+  #lobeL { left: 18px; } #lobeR { right: 18px; }
+  .lobe.on { background: rgba(90,150,60,.85); }
+  .lobe.fail { background: rgba(160,60,40,.85); }
+  #help {
+    position: fixed; left: 12px; bottom: 10px; font-size: 12px; line-height: 1.6;
+    background: rgba(0,0,0,.4); padding: 6px 10px; border-radius: 8px; pointer-events: none; white-space: pre;
+  }
+  #done {
+    position: fixed; left: 50%; top: 62%; transform: translate(-50%, -50%); display: none;
+    background: rgba(40,25,15,.78); padding: 16px 30px; border-radius: 16px; text-align: center; white-space: pre-line;
+  }
+  #done b { font-size: 32px; display: block; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="panel">
+  <div id="row1"><span>オーブンまで</span><span id="dist"></span></div>
+  <div id="bar"><div id="barFill"></div></div>
+  <div id="row2"><span id="tip"></span><span id="stat"></span></div>
+</div>
+<div id="gauge"><div id="gBar"><div id="gNeedle"></div></div></div>
+<div class="lobe" id="lobeL">左の端<br><span>LT</span></div>
+<div class="lobe" id="lobeR">右の端<br><span>RT</span></div>
+<div id="pops"></div>
+<div id="done"><b></b><span id="doneSub"></span></div>
+<div id="help"></div>
+<script type="module">
+import * as THREE from 'three';
+import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
+
+const $ = id => document.getElementById(id);
+
+// =====================================================================
+// 設定
+//   プレイヤーは生地。左右の端（出っ張り）を、左右のスティックで伸ばす方向へ動かす。
+//   LT / RT でその端を地面に張り付ける。張り付けた端を支点に、反対の端を伸ばして → 張り付けて → 離して縮める。
+//   尺取り虫のようにくり返して、オーブンまで進む。
+// =====================================================================
+const CFG = {
+  // 生地
+  spacing: 0.42, RX: 1.55, RY: 0.75, RZ: 0.95,
+  gravity: 26, damping: 0.985, iterations: 8,
+  stiff: 0.34, yieldS: 0.16, plast: 2.5, recov: 0.4,
+  // 端（出っ張り）
+  lobeFrac: 0.33,             // 左右それぞれ、端から何割を「端」とするか
+  home: 1.1,                  // スティックを離した時の、端の位置（中心からの横距離）
+  reach: 3.4,                 // スティックを倒しきった時に端が伸びる距離
+  drive: 0.1,                // 端が目標へ向かう力（反復ごと）
+  stickCurve: 0.9, deadzone: 0.12,
+  // 張り付き
+  stickDist: 0.25,            // 地面からこの高さ以内なら張り付ける
+  fric: 0.35,                 // ふつうの床の摩擦
+  flourFric: 0.04,            // 粉の上はつるつる
+  flourSlip: 0.25,            // 粉の上で張り付けても少しずつずれる
+  wetFric: 0.9,               // 濡れた所はべたっと止まる
+  // ちぎれ
+  restSpan: 2.1,              // ふだんの両端の間隔
+  tearSpan: 3.3,              // これ以上伸ばした状態が tearHold 秒続くとちぎれる
+  tearHold: 0.4,
+  // 進み
+  respawnDelay: 1.0,
+};
+
+// コース：奥（-z）へ進む。台の上だけ床がある（すき間は落ちる）
+// type: board（ふつう）/ flour（粉でつるつる）/ wet（べたっと止まる）
+const COURSE = [
+  { x0: -4.5, x1: 4.5, z0: -9, z1: 4, type: 'board', cp: true, name: 'スタート' },
+  { x0: -3.5, x1: 3.5, z0: -17, z1: -10.2, type: 'board', cp: true, name: 'すき間をこえた' },
+  { x0: -1.3, x1: 1.3, z0: -26, z1: -17, type: 'board', cp: false, name: '細い橋' },
+  { x0: -4, x1: 4, z0: -36, z1: -27.4, type: 'board', cp: true, name: '粉の台' },
+  { x0: -3.4, x1: 3.4, z0: -34, z1: -29.5, type: 'flour', overlay: true },
+  { x0: -2.6, x1: 2.6, z0: -46, z1: -37.8, type: 'board', cp: true, name: 'オーブン前' },
+  { x0: -1.6, x1: 1.6, z0: -42, z1: -39.8, type: 'wet', overlay: true },
+];
+const START_Z = 1.5, OVEN_Z = -44.2;
+
+// =====================================================================
+// three.js
+// =====================================================================
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#2a1d13');
+scene.fog = new THREE.Fog('#2a1d13', 25, 60);
+const camera = new THREE.PerspectiveCamera(48, 1, 0.1, 200);
+scene.add(new THREE.HemisphereLight('#fff4e0', '#5a3a20', 0.9));
+const sun = new THREE.DirectionalLight('#fff1dc', 1.5);
+sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -12, right: 12, top: 12, bottom: -12, near: 1, far: 50 });
+scene.add(sun, sun.target);
+
+function woodTexture(w, h, base, seed0) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const b = c.getContext('2d');
+  b.fillStyle = base; b.fillRect(0, 0, w, h);
+  let seed = seed0; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 60; i++) {
+    const y0 = rnd() * h, amp = 2 + rnd() * 6, freq = 0.004 + rnd() * 0.008, ph = rnd() * 6;
+    b.strokeStyle = `rgba(${110 + rnd() * 40 | 0},${65 + rnd() * 30 | 0},25,${0.06 + rnd() * 0.14})`;
+    b.lineWidth = 1 + rnd() * 3; b.beginPath();
+    for (let x = 0; x <= w; x += 8) { const y = y0 + Math.sin(x * freq + ph) * amp; x ? b.lineTo(x, y) : b.moveTo(x, y); }
+    b.stroke();
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; return t;
+}
+const boardMat = new THREE.MeshStandardMaterial({ map: woodTexture(512, 512, '#d9ab72', 7), roughness: 0.75 });
+const sideMat = new THREE.MeshStandardMaterial({ color: '#a8773f', roughness: 0.8 });
+for (const p of COURSE) {
+  if (p.overlay) {
+    const col = p.type === 'flour' ? '#fbf7ee' : '#7fa3c8';
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(p.x1 - p.x0, p.z1 - p.z0),
+      new THREE.MeshStandardMaterial({ color: col, roughness: p.type === 'wet' ? 0.15 : 1, transparent: true, opacity: p.type === 'wet' ? 0.55 : 0.85 }));
+    m.rotation.x = -Math.PI / 2; m.position.set((p.x0 + p.x1) / 2, 0.012, (p.z0 + p.z1) / 2); m.receiveShadow = true;
+    scene.add(m);
+    continue;
+  }
+  const m = new THREE.Mesh(new THREE.BoxGeometry(p.x1 - p.x0, 0.6, p.z1 - p.z0), [sideMat, sideMat, boardMat, sideMat, sideMat, sideMat]);
+  m.position.set((p.x0 + p.x1) / 2, -0.3, (p.z0 + p.z1) / 2); m.receiveShadow = true; m.castShadow = true;
+  scene.add(m);
+}
+// はるか下の床（落ちた先）
+const floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(200, 200), new THREE.MeshStandardMaterial({ color: '#3a2a1c', roughness: 1 }));
+floorMesh.rotation.x = -Math.PI / 2; floorMesh.position.y = -9; floorMesh.receiveShadow = true; scene.add(floorMesh);
+// オーブン
+const oven = new THREE.Group();
+const ovenBody = new THREE.Mesh(new THREE.BoxGeometry(5, 4, 3), new THREE.MeshStandardMaterial({ color: '#5a5f66', roughness: 0.5, metalness: 0.3 }));
+ovenBody.position.y = 2; oven.add(ovenBody);
+const mouth = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 1.8), new THREE.MeshBasicMaterial({ color: '#ff8a3a' }));
+mouth.position.set(0, 1.3, 1.51); oven.add(mouth);
+const ovenLight = new THREE.PointLight('#ff9a4a', 4, 9);
+ovenLight.position.set(0, 1.3, 2.4); oven.add(ovenLight);
+oven.position.set(0, 0, OVEN_Z - 1.2);
+oven.traverse(o => { if (o.isMesh) o.castShadow = true; });
+scene.add(oven);
+
+// 生地の見た目
+const MC_S = 6, MC_RES = 44;
+const doughMat = new THREE.MeshStandardMaterial({ color: '#e6d2a8', roughness: 0.85 });
+const mc = new MarchingCubes(MC_RES, doughMat, false, false, 90000);
+mc.scale.set(MC_S, MC_S, MC_S); mc.castShadow = true; mc.receiveShadow = true; mc.isolation = 80;
+scene.add(mc);
+const BALL = 0.06, SUB = 12;
+// 端の目印（張り付いている時は濃く）
+const marks = [0, 1].map(i => {
+  const m = new THREE.Mesh(new THREE.RingGeometry(0.45, 0.6, 32),
+    new THREE.MeshBasicMaterial({ color: i ? '#ff9a8a' : '#7fb6ff', transparent: true, opacity: 0.5, depthWrite: false }));
+  m.rotation.x = -Math.PI / 2; scene.add(m); return m;
+});
+const targets = [0, 1].map(i => {
+  const m = new THREE.Mesh(new THREE.CircleGeometry(0.18, 16),
+    new THREE.MeshBasicMaterial({ color: i ? '#ff9a8a' : '#7fb6ff', transparent: true, opacity: 0.7, depthWrite: false }));
+  m.rotation.x = -Math.PI / 2; scene.add(m); return m;
+});
+
+// =====================================================================
+// 床
+// =====================================================================
+function surfaceAt(x, z) {
+  // 床の種類（上に重ねた粉・濡れを優先）。床がなければ null
+  let base = null, over = null;
+  for (const p of COURSE) {
+    if (x < p.x0 || x > p.x1 || z < p.z0 || z > p.z1) continue;
+    if (p.overlay) over = p.type; else base = p.type;
+  }
+  if (!base) return null;
+  return over || base;
+}
+function platformIndexAt(x, z) {
+  for (let i = 0; i < COURSE.length; i++) { const p = COURSE[i]; if (!p.overlay && x >= p.x0 && x <= p.x1 && z >= p.z0 && z <= p.z1) return i; }
+  return -1;
+}
+
+// =====================================================================
+// 生地（粒子 + 塑性バネ）
+// =====================================================================
+let parts = [], springs = [], lobes = [[], []];
+let checkpoint = 0, falls = 0, tears = 0, startTime = null, endTime = null, done = false;
+let failing = null, respawnT = 0, overT = 0, span = 0, kneaded = 0, spawning = false;
+
+function spawnDough(cpIndex, drop) {
+  parts = []; springs = []; lobes = [[], []];
+  const s = CFG.spacing, { RX, RY, RZ } = CFG, pr = s * 0.5;
+  const p0 = COURSE[cpIndex];
+  const cx = (p0.x0 + p0.x1) / 2, cz = cpIndex === 0 ? START_Z : p0.z1 - 2;
+  const y0 = RY + pr + (drop ? 6 : 0);
+  for (let x = -RX; x <= RX + 1e-6; x += s) for (let y = -RY; y <= RY + 1e-6; y += s) for (let z = -RZ; z <= RZ + 1e-6; z += s) {
+    if ((x * x) / (RX * RX) + (y * y) / (RY * RY) + (z * z) / (RZ * RZ) > 1) continue;
+    const p = new THREE.Vector3(cx + x + (Math.random() - .5) * 0.04, y0 + y, cz + z + (Math.random() - .5) * 0.04);
+    const pt = { p, q: p.clone(), lobe: -1, anchor: null };
+    if (x < -RX * (1 - 2 * CFG.lobeFrac)) pt.lobe = 0;
+    else if (x > RX * (1 - 2 * CFG.lobeFrac)) pt.lobe = 1;
+    if (pt.lobe >= 0) lobes[pt.lobe].push(pt);
+    parts.push(pt);
+  }
+  for (let i = 0; i < parts.length; i++) for (let j = i + 1; j < parts.length; j++) {
+    const d = parts[i].p.distanceTo(parts[j].p);
+    if (d < s * 1.5) springs.push({ a: parts[i], b: parts[j], rest0: d, rest: d, near: true });
+    else if (d < s * 1.9) springs.push({ a: parts[i], b: parts[j], rest0: d, rest: d, near: false });
+  }
+  failing = null; respawnT = 0; overT = 0; spawning = !!drop;
+  for (const l of lobeState) { l.on = false; l.prev = false; }
+}
+function resetGame() {
+  checkpoint = 0; falls = 0; tears = 0; startTime = null; endTime = null; done = false; kneaded = 0;
+  $('done').style.display = 'none';
+  spawnDough(0, false);
+}
+
+const centroid = () => { const c = new THREE.Vector3(); for (const p of parts) c.add(p.p); return c.divideScalar(Math.max(1, parts.length)); };
+const lobeCenter = i => { const c = new THREE.Vector3(); for (const p of lobes[i]) c.add(p.p); return c.divideScalar(Math.max(1, lobes[i].length)); };
+
+// =====================================================================
+// 入力
+// =====================================================================
+const keys = {};
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'KeyR') resetGame();
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+function stick(x, y) {
+  const m = Math.hypot(x, y);
+  if (m < CFG.deadzone) return [0, 0];
+  const n = Math.pow(Math.min(1, (m - CFG.deadzone) / (1 - CFG.deadzone)), CFG.stickCurve);
+  return [x / m * n, y / m * n];
+}
+let curPad = null, padName = '', startPrev = false, aPrev = false;
+function readInput() {
+  const inp = [{ x: 0, z: 0, grip: 0 }, { x: 0, z: 0, grip: 0 }];
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let pad = null; for (const p of pads) if (p && p.connected) { pad = p; break; }
+  curPad = pad; padName = pad ? pad.id : '';
+  if (pad) {
+    const b = i => pad.buttons[i] ? pad.buttons[i].value : 0;
+    [inp[0].x, inp[0].z] = stick(pad.axes[0] || 0, pad.axes[1] || 0);
+    [inp[1].x, inp[1].z] = stick(pad.axes[2] || 0, pad.axes[3] || 0);
+    inp[0].grip = b(6); inp[1].grip = b(7);
+    const st = b(9) > 0.5, a = b(0) > 0.5;
+    if ((st && !startPrev) || (a && !aPrev && done)) resetGame();
+    startPrev = st; aPrev = a;
+  }
+  const k = c => keys[c] ? 1 : 0;
+  inp[0].x += k('KeyD') - k('KeyA'); inp[0].z += k('KeyS') - k('KeyW');
+  inp[1].x += k('ArrowRight') - k('ArrowLeft'); inp[1].z += k('ArrowDown') - k('ArrowUp');
+  if (keys.KeyQ) inp[0].grip = 1;
+  if (keys.KeyM) inp[1].grip = 1;
+  return inp;
+}
+function rumble(strong, weak, ms) {
+  const act = curPad && curPad.vibrationActuator;
+  if (act && act.playEffect) act.playEffect('dual-rumble', { duration: ms, strongMagnitude: Math.min(1, strong), weakMagnitude: Math.min(1, weak) }).catch(() => {});
+}
+
+// =====================================================================
+// 端（出っ張り）の操作
+// =====================================================================
+const lobeState = [0, 1].map(i => ({ i, side: i ? 1 : -1, on: false, prev: false, target: new THREE.Vector3(), failT: 0 }));
+function updateLobes(dt) {
+  const inp = readInput();
+  if (startTime === null && inp.some(n => Math.hypot(n.x, n.z) > 0.2 || n.grip > 0.2)) startTime = performance.now();
+  const c = centroid();
+  const lcs = [lobeCenter(0), lobeCenter(1)];
+  lobeState.forEach((L, i) => {
+    const n = inp[i];
+    // 目標：反対の端が張り付いていれば「その端」から、そうでなければ体の中心から測る
+    //   → 張り付けた端を支点に、もう片方をスティックの方向へ伸ばせる。離すとふだんの間隔まで縮む
+    const o = lobeState[1 - i];
+    const ref = o.on ? lcs[1 - i].clone().add(new THREE.Vector3(L.side * CFG.home * 2, 0, 0)) : c.clone().add(new THREE.Vector3(L.side * CFG.home, 0, 0));
+    L.target.set(ref.x + THREE.MathUtils.clamp(n.x, -1, 1) * CFG.reach, 0, ref.z + THREE.MathUtils.clamp(n.z, -1, 1) * CFG.reach);
+    const want = n.grip > 0.5 && !failing && !done && !spawning;
+    if (want && !L.prev) {
+      // 張り付ける：地面に触れている粒子だけ。空中では張り付けない
+      let stuck = 0;
+      for (const pt of lobes[i]) {
+        const surf = surfaceAt(pt.p.x, pt.p.z);
+        if (surf && pt.p.y < CFG.spacing * 0.5 + CFG.stickDist) { pt.anchor = pt.p.clone(); stuck++; }
+      }
+      L.on = stuck >= 3;
+      if (!L.on) { for (const pt of lobes[i]) pt.anchor = null; L.failT = 0.4; rumble(0.1, 0.3, 60); }
+      else rumble(0.35, 0.25, 50);
+    }
+    if (!want && L.on) { L.on = false; for (const pt of lobes[i]) pt.anchor = null; }
+    L.prev = want;
+    L.failT = Math.max(0, L.failT - dt);
+  });
+}
+
+// =====================================================================
+// 物理
+// =====================================================================
+function step(dt) {
+  const pr = CFG.spacing * 0.5, minD = CFG.spacing * 0.85, g = CFG.gravity * dt * dt;
+  for (const pt of parts) {
+    const p = pt.p, q = pt.q;
+    const vx = (p.x - q.x) * CFG.damping, vy = (p.y - q.y) * CFG.damping, vz = (p.z - q.z) * CFG.damping;
+    q.copy(p); p.x += vx; p.y += vy - g; p.z += vz;
+  }
+  const lc = [lobeCenter(0), lobeCenter(1)];
+  for (let it = 0; it < CFG.iterations; it++) {
+    // 端を目標へ（張り付いていない端だけ）。生地の「筋肉」なので、端を動かした分だけ残りの体は逆へ引かれる
+    //   → 何も張り付けていないと、その場でうねうねするだけで進まない。張り付けた端を支点にすると進める
+    lobeState.forEach((L, i) => {
+      if (L.on || failing) return;
+      const dx = (L.target.x - lc[i].x) * CFG.drive, dz = (L.target.z - lc[i].z) * CFG.drive;
+      const nL = lobes[i].length;
+      let nO = 0; for (const pt of parts) if (pt.lobe !== i && !pt.anchor) nO++;
+      const rx = -dx * nL / Math.max(1, nO), rz = -dz * nL / Math.max(1, nO);
+      for (const pt of parts) {
+        if (pt.lobe === i) { pt.p.x += dx; pt.p.z += dz; }
+        else if (!pt.anchor) { pt.p.x += rx; pt.p.z += rz; }
+      }
+      lc[i].x += dx; lc[i].z += dz;
+    });
+    for (const sp of springs) {
+      const a = sp.a.p, b = sp.b.p;
+      const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+      const d = Math.hypot(dx, dy, dz) || 1e-5;
+      const wa = sp.a.anchor ? 0.15 : 1, wb = sp.b.anchor ? 0.15 : 1, ws = wa + wb;
+      const f = (d - sp.rest) / d * (sp.near ? CFG.stiff : CFG.stiff * 0.5);
+      a.x += dx * f * wa / ws; a.y += dy * f * wa / ws; a.z += dz * f * wa / ws;
+      b.x -= dx * f * wb / ws; b.y -= dy * f * wb / ws; b.z -= dz * f * wb / ws;
+    }
+    if (it === 0 || it === CFG.iterations - 1) {
+      for (let i = 0; i < parts.length; i++) {
+        const A = parts[i], a = A.p;
+        for (let j = i + 1; j < parts.length; j++) {
+          const b = parts[j].p;
+          const dx = b.x - a.x; if (dx > minD || dx < -minD) continue;
+          const dy = b.y - a.y; if (dy > minD || dy < -minD) continue;
+          const dz = b.z - a.z; if (dz > minD || dz < -minD) continue;
+          const d = Math.hypot(dx, dy, dz) || 1e-5;
+          if (d >= minD) continue;
+          const f = (d - minD) / d * 0.5;
+          a.x += dx * f; a.y += dy * f; a.z += dz * f;
+          b.x -= dx * f; b.y -= dy * f; b.z -= dz * f;
+        }
+      }
+    }
+    // 床と張り付き
+    for (const pt of parts) {
+      const surf = surfaceAt(pt.p.x, pt.p.z);
+      if (surf && pt.p.y < pr && pt.p.y > -0.6) pt.p.y = pr;
+      if (pt.anchor) {
+        const slip = surf === 'flour' ? CFG.flourSlip : 0;
+        const k = 1 - slip;
+        pt.p.x += (pt.anchor.x - pt.p.x) * k; pt.p.z += (pt.anchor.z - pt.p.z) * k;
+        if (slip) { pt.anchor.x += (pt.p.x - pt.anchor.x) * 0.02; pt.anchor.z += (pt.p.z - pt.anchor.z) * 0.02; }
+        if (pt.p.y > pr) pt.p.y += (pr - pt.p.y) * 0.3;
+      }
+    }
+  }
+  // 摩擦（床の種類で変わる）
+  for (const pt of parts) {
+    const surf = surfaceAt(pt.p.x, pt.p.z);
+    if (!surf || pt.p.y > pr + 0.02) continue;
+    const fr = surf === 'flour' ? CFG.flourFric : surf === 'wet' ? CFG.wetFric : CFG.fric;
+    pt.q.x += (pt.p.x - pt.q.x) * fr; pt.q.z += (pt.p.z - pt.q.z) * fr;
+    if (pt.q.y < pt.p.y) pt.q.y = pt.p.y;
+    if (pt.anchor) pt.q.copy(pt.p);
+  }
+  // 塑性（形が少しずつ流れる）
+  const pl = Math.min(1, CFG.plast * dt);
+  for (const sp of springs) {
+    const len = sp.a.p.distanceTo(sp.b.p), strain = (len - sp.rest) / sp.rest;
+    if (Math.abs(strain) > CFG.yieldS) sp.rest += (len - Math.sign(strain) * CFG.yieldS * sp.rest - sp.rest) * pl;
+    sp.rest += (sp.rest0 - sp.rest) * Math.min(1, CFG.recov * dt);
+    sp.rest = THREE.MathUtils.clamp(sp.rest, sp.rest0 * 0.6, sp.rest0 * 2.2);
+  }
+
+  // 着地
+  if (spawning) {
+    let minY = Infinity; for (const pt of parts) minY = Math.min(minY, pt.p.y);
+    if (minY < pr + 0.05) { spawning = false; puff(centroid().setY(0.1), 26, 1); rumble(0.4, 0.3, 100); }
+  }
+  // 伸ばし具合（両端の間隔）→ こねた度・ちぎれ
+  const l0 = lobeCenter(0), l1 = lobeCenter(1);
+  span = Math.hypot(l1.x - l0.x, l1.z - l0.z);
+  if (!failing && !done) {
+    kneaded = Math.min(100, kneaded + Math.max(0, span - CFG.restSpan * 0.7) * dt * 1.5);
+    if (span > CFG.tearSpan) { overT += dt; if (overT > CFG.tearHold) tear(); }
+    else overT = Math.max(0, overT - dt * 2);
+  }
+  // 落ちた：中心が床のない所でまな板より下
+  const c = centroid();
+  if (!failing && !done && !spawning && c.y < -1.2) fail('落ちた…', 'fall');
+  // チェックポイント
+  if (!failing && !done && !spawning) {
+    const pi = platformIndexAt(c.x, c.z);
+    if (pi > checkpoint && COURSE[pi].cp) { checkpoint = pi; popup(c.clone().setY(2), 'チェックポイント：' + COURSE[pi].name, '#bdf08a', false); rumble(0.3, 0.3, 80); }
+    // ゴール
+    if (c.z < OVEN_Z + 0.6 && Math.abs(c.x) < 1.8 && c.y > -0.5) goal();
+  }
+}
+
+function tear() {
+  // 一番伸びた所で 2 つに切れる
+  const l0 = lobeCenter(0), l1 = lobeCenter(1), m = l0.clone().add(l1).multiplyScalar(0.5), nrm = l1.clone().sub(l0).setY(0).normalize();
+  springs = springs.filter(sp => sp.a.p.clone().sub(m).dot(nrm) * sp.b.p.clone().sub(m).dot(nrm) >= 0);
+  for (const pt of parts) pt.q.lerp(pt.p, 0.7);
+  puff(m, 22, 1.2);
+  tears++;
+  fail('ちぎれた！', 'tear');
+}
+function fail(reason, kind) {
+  if (failing) return;
+  failing = { reason, kind, t: 0 };
+  for (const L of lobeState) L.on = false;
+  for (const pt of parts) pt.anchor = null;
+  if (kind === 'fall') falls++;
+  popup(centroid().setY(Math.max(1.5, centroid().y + 2)), reason, '#ff7a5c', true);
+  rumble(1, 0.8, 300);
+  respawnT = CFG.respawnDelay;
+}
+function goal() {
+  done = true; endTime = performance.now();
+  for (const L of lobeState) L.on = false;
+  for (const pt of parts) pt.anchor = null;
+  rumble(1, 1, 500);
+  puff(centroid(), 60, 1.5);
+  $('done').querySelector('b').textContent = 'オーブンに入った！ パンが焼けた！';
+  $('doneSub').textContent = `タイム ${fmtTime(endTime - (startTime || endTime))}　落ちた ${falls}回　ちぎれた ${tears}回\nこねた度 ${Math.floor(kneaded)}　Start / R でもう一度`;
+  $('done').style.display = 'block';
+}
+
+// =====================================================================
+// 演出
+// =====================================================================
+const PN = 400;
+const pPos = new Float32Array(PN * 3).fill(-100), pVel = new Float32Array(PN * 3), pLife = new Float32Array(PN);
+const pGeo = new THREE.BufferGeometry(); pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+scene.add(new THREE.Points(pGeo, new THREE.PointsMaterial({ color: '#fffaf0', size: 0.1, transparent: true, opacity: 0.85, depthWrite: false })));
+let pNext = 0;
+function puff(at, n, power) {
+  for (let i = 0; i < n; i++) {
+    const j = pNext; pNext = (pNext + 1) % PN;
+    const a = Math.random() * Math.PI * 2, sp = (1 + Math.random() * 3) * power;
+    pPos[j * 3] = at.x + Math.cos(a) * 0.8; pPos[j * 3 + 1] = Math.max(0.05, at.y); pPos[j * 3 + 2] = at.z + Math.sin(a) * 0.8;
+    pVel[j * 3] = Math.cos(a) * sp; pVel[j * 3 + 1] = 1 + Math.random() * 2.5 * power; pVel[j * 3 + 2] = Math.sin(a) * sp;
+    pLife[j] = 0.5 + Math.random() * 0.7;
+  }
+}
+const tmpV = new THREE.Vector3();
+function popup(at, text, col, big) {
+  tmpV.copy(at).project(camera);
+  const el = document.createElement('div');
+  el.className = 'pop'; el.textContent = text;
+  el.style.left = ((tmpV.x + 1) / 2 * innerWidth) + 'px';
+  el.style.top = ((1 - tmpV.y) / 2 * innerHeight) + 'px';
+  el.style.color = col; el.style.fontSize = (big ? 30 : 20) + 'px';
+  $('pops').appendChild(el);
+  setTimeout(() => el.remove(), 1250);
+}
+function fmtTime(ms) { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+
+function syncDough(t) {
+  mc.reset();
+  if (!parts.length) { mc.update(); return; }
+  const c = centroid();
+  mc.position.set(c.x, c.y + MC_S - 2.2, c.z);
+  const inv = 1 / (2 * MC_S);
+  for (const pt of parts) {
+    const bx = (pt.p.x - mc.position.x) * inv + 0.5, by = (pt.p.y - mc.position.y) * inv + 0.5, bz = (pt.p.z - mc.position.z) * inv + 0.5;
+    if (bx < 0.02 || bx > 0.98 || by < 0.02 || by > 0.98 || bz < 0.02 || bz > 0.98) continue;
+    mc.addBall(bx, by, bz, BALL, SUB);
+  }
+  mc.update();
+  const k = kneaded / 100;
+  doughMat.color.set('#dcc49a').lerp(new THREE.Color('#fbeed4'), k);
+  doughMat.emissive.set('#ff3a1a').multiplyScalar(overT > 0 ? 0.25 + 0.2 * Math.sin(t * 40) : Math.max(0, (span - CFG.tearSpan * 0.8) / (CFG.tearSpan * 0.2)) * 0.25);
+  lobeState.forEach((L, i) => {
+    const lc = lobeCenter(i);
+    marks[i].position.set(lc.x, Math.max(0.02, lc.y - 0.4), lc.z);
+    marks[i].material.opacity = L.on ? 0.95 : 0.35;
+    marks[i].scale.setScalar(L.on ? 1.2 : 1);
+    targets[i].position.set(L.target.x, 0.03, L.target.z);
+    targets[i].visible = !L.on && !failing;
+  });
+}
+function updateFx(dt) {
+  for (let j = 0; j < PN; j++) {
+    if (pLife[j] <= 0) continue;
+    pLife[j] -= dt; pVel[j * 3 + 1] -= 8 * dt;
+    for (let k = 0; k < 3; k++) pPos[j * 3 + k] += pVel[j * 3 + k] * dt;
+    if (pLife[j] <= 0) pPos[j * 3 + 1] = -100;
+  }
+  pGeo.attributes.position.needsUpdate = true;
+}
+const camPos = new THREE.Vector3(0, 10, 12), camLook = new THREE.Vector3();
+function updateCamera(dt) {
+  const c = parts.length ? centroid() : camLook;
+  const tgtLook = new THREE.Vector3(c.x * 0.6, 0, Math.min(c.z, 2) - 2.5);
+  camLook.lerp(tgtLook, Math.min(1, dt * 3));
+  const k = Math.max(1, 1.4 / camera.aspect);
+  const tgtPos = camLook.clone().add(new THREE.Vector3(0, 10 * k, 10.5 * k));
+  camPos.lerp(tgtPos, Math.min(1, dt * 3));
+  camera.position.copy(camPos); camera.lookAt(camLook);
+  sun.position.copy(camLook).add(new THREE.Vector3(-4, 16, 6)); sun.target.position.copy(camLook);
+}
+
+function hud(now) {
+  const c = parts.length ? centroid() : new THREE.Vector3(0, 0, START_Z);
+  const total = START_Z - OVEN_Z, prog = THREE.MathUtils.clamp((START_Z - c.z) / total, 0, 1);
+  $('barFill').style.width = (prog * 100) + '%';
+  $('dist').textContent = done ? 'ゴール！' : Math.max(0, c.z - OVEN_Z).toFixed(1) + ' m';
+  const bar = $('bar');
+  if (!bar.dataset.cp) {
+    bar.dataset.cp = 1;
+    for (const p of COURSE) if (p.cp && p !== COURSE[0]) {
+      const d = document.createElement('div'); d.className = 'cp';
+      d.style.left = ((START_Z - p.z1) / total * 100) + '%'; bar.appendChild(d);
+    }
+  }
+  const tip = $('tip');
+  const surf = parts.length ? surfaceAt(c.x, c.z) : null;
+  tip.className = failing || overT > 0 ? 'warn' : '';
+  tip.textContent = failing ? (failing.kind === 'fall' ? 'チェックポイントから やり直し' : 'ちぎれた… チェックポイントから') :
+    overT > 0 ? 'ちぎれる！ 縮めて！' :
+    lobeState.some(L => L.failT > 0) ? '空中では張り付けない！' :
+    surf === 'flour' ? '粉の上はつるつる滑る！' : surf === 'wet' ? '濡れた所はべたっと止まる' :
+    '片方を張り付けて、もう片方を伸ばす → 張り替えて縮める';
+  const t = startTime === null ? 0 : (done ? endTime : now) - startTime;
+  $('stat').textContent = (falls || tears ? `落ちた ${falls}　ちぎれ ${tears}　` : '') + '⏱ ' + fmtTime(t);
+  $('gNeedle').style.left = Math.min(100, span / (CFG.tearSpan / 0.85) * 100) + '%';
+  $('gauge').className = overT > 0 ? 'danger' : '';
+  lobeState.forEach((L, i) => {
+    const el = $(i ? 'lobeR' : 'lobeL');
+    el.className = 'lobe' + (L.on ? ' on' : L.failT > 0 ? ' fail' : '');
+    el.querySelector('span').textContent = L.on ? '張り付き中' : (i ? 'RT' : 'LT');
+  });
+  $('help').textContent =
+    (padName ? '🎮 ' + padName.slice(0, 34) : '🎮 未接続（ボタンを押すと認識）') + '\n' +
+    '左スティック：左の端を伸ばす　右スティック：右の端を伸ばす　LT / RT：その端を地面に張り付ける\n' +
+    'キーボード：左の端 WASD・Q ／ 右の端 矢印・M ／ R やり直し';
+}
+
+// =====================================================================
+// ループ
+// =====================================================================
+function resize() {
+  const w = Math.max(1, innerWidth), hh = Math.max(1, innerHeight);
+  renderer.setSize(w, hh); camera.aspect = w / hh; camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+resize();
+resetGame();
+window.G = { get parts() { return parts; }, lobeState, CFG, get span() { return span; }, get falls() { return falls; }, get tears() { return tears; },
+  get checkpoint() { return checkpoint; }, get done() { return done; }, get failing() { return failing; }, centroid, get kneaded() { return kneaded; } };
+
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(1 / 30, (now - last) / 1000); last = now;
+  if (renderer.domElement.width !== Math.round(innerWidth * renderer.getPixelRatio())) resize();
+  updateLobes(dt);
+  if (parts.length) step(1 / 60);
+  if (failing) {
+    failing.t += dt;
+    if (respawnT > 0) { respawnT -= dt; if (respawnT <= 0) { respawnT = 0; spawnDough(checkpoint, true); } }
+  }
+  updateFx(dt);
+  syncDough(now / 1000);
+  updateCamera(dt);
+  hud(now);
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
