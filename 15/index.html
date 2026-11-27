@@ -1,0 +1,735 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>15 肩とひじを別々に動かしてめん棒を転がす 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a1d13; }
+  canvas { display: block; }
+  body { font-family: "Hiragino Maru Gothic ProN", "Hiragino Sans", system-ui, sans-serif; color: #fff3e0; }
+  #panel {
+    position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+    width: min(460px, calc(100vw - 40px)); padding: 10px 16px 8px; border-radius: 12px;
+    background: rgba(40,25,15,.6); pointer-events: none;
+  }
+  #row1 { display: flex; justify-content: space-between; align-items: baseline; font-weight: bold; }
+  #bar { height: 14px; border-radius: 7px; background: rgba(0,0,0,.35); margin: 6px 0; overflow: hidden; position: relative; }
+  #barFill { height: 100%; width: 0; background: linear-gradient(90deg,#d8c39a,#f4d28a,#ffb347); }
+  #barGoal { position: absolute; top: 0; bottom: 0; width: 2px; background: #fff; }
+  #row2 { display: flex; justify-content: space-between; font-size: 12px; }
+  #tip.warn { color: #ff9b80; }
+  #gauge {
+    position: fixed; top: 96px; left: 50%; transform: translateX(-50%);
+    width: min(320px, calc(100vw - 60px)); padding: 6px 10px; border-radius: 10px;
+    background: rgba(40,25,15,.6); pointer-events: none; font-size: 11px;
+  }
+  #gBar { position: relative; height: 10px; border-radius: 5px; overflow: hidden;
+    background: linear-gradient(90deg, rgba(130,210,90,.8) 0 60%, rgba(255,190,70,.85) 60% 85%, rgba(230,70,50,.9) 85%); }
+  #gNeedle { position: absolute; top: -2px; bottom: -2px; width: 4px; margin-left: -2px; background: #fff; box-shadow: 0 0 4px #000; }
+  #gauge.danger { animation: blink .12s infinite alternate; }
+  @keyframes blink { to { background: rgba(160,30,20,.75); } }
+  .press { position: fixed; bottom: 86px; width: 30px; height: 140px; padding: 5px; border-radius: 9px; background: rgba(40,25,15,.6); pointer-events: none; }
+  #pressL { left: 18px; } #pressR { right: 18px; }
+  .press div { position: absolute; left: 5px; right: 5px; bottom: 5px; border-radius: 5px; background: linear-gradient(0deg,#f4d28a,#ff7a3c); }
+  .press span { position: absolute; bottom: -18px; left: 0; right: 0; text-align: center; font-size: 12px; font-weight: bold; }
+  #pops { position: fixed; inset: 0; pointer-events: none; }
+  .pop {
+    position: absolute; transform: translate(-50%, -50%); font-weight: 900; white-space: nowrap;
+    text-shadow: 0 0 6px rgba(40,20,10,.9), 0 2px 0 rgba(40,20,10,.9); animation: pop 1.2s ease-out forwards;
+  }
+  @keyframes pop {
+    0% { opacity: 1; transform: translate(-50%, -50%) scale(1.4); }
+    12% { transform: translate(-50%, -50%) scale(1); }
+    70% { opacity: 1; }
+    100% { opacity: 0; transform: translate(-50%, -110%) scale(1); }
+  }
+  #help {
+    position: fixed; left: 12px; bottom: 10px; font-size: 12px; line-height: 1.6;
+    background: rgba(0,0,0,.4); padding: 6px 10px; border-radius: 8px; pointer-events: none; white-space: pre;
+  }
+  #done {
+    position: fixed; left: 50%; top: 66%; transform: translate(-50%, -50%); display: none;
+    background: rgba(40,25,15,.78); padding: 16px 30px; border-radius: 16px; text-align: center; white-space: pre-line;
+  }
+  #done b { font-size: 30px; display: block; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="panel">
+  <div id="row1"><span>のばし具合（100% で完成）</span><span id="cov"></span></div>
+  <div id="bar"><div id="barFill"></div><div id="barGoal"></div></div>
+  <div id="row2"><span id="tip"></span><span id="stat"></span></div>
+</div>
+<div id="gauge">細長さ（右の赤まで行くと裂ける）<div id="gBar"><div id="gNeedle"></div></div></div>
+<div class="press" id="pressL"><div></div><span>LT</span></div>
+<div class="press" id="pressR"><div></div><span>RT</span></div>
+<div id="pops"></div>
+<div id="done"><b></b><span id="doneSub"></span></div>
+<div id="help"></div>
+<script type="module">
+import * as THREE from 'three';
+import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
+
+const $ = id => document.getElementById(id);
+
+// =====================================================================
+// 15：肩とひじを別々に動かして、めん棒を転がす
+//   手はめん棒の両端を握っている（13と同じ）
+//   左右スティック上下 ＝ その側の肩を前へ乗り出す／後ろへ引く（乗り出すと肩が下がる）
+//   左右スティック左右 ＝ その腕を左右へ振る
+//   LT / RT ＝ その腕のひじを伸ばす（離すとひじが曲がって手が上がる）。ひじを伸ばすほど手が下がって、めん棒を押しつける
+//   ふつうの「めん棒を前へ転がす」を、肩とひじに分けて自分で組み立てる：
+//     前へ転がす ＝ 肩を乗り出しながら、ひじを少し曲げていく（そうしないと押しつけすぎる）
+//     手前へ戻す ＝ 肩を引きながら、ひじを伸ばしていく（そうしないとめん棒が浮いて空振り）
+//   失敗：勢いよく下ろす → 叩きつけて穴があく ／ 押しつけすぎ → 破れる
+//         左右で押す強さがちがう → 片側だけ薄くなって破れる ／ 同じ向きばかり → 細長く裂ける
+// =====================================================================
+const CFG = {
+  // めん棒
+  pinLen: 7.0, pinR: 0.34, gripHalf: 2.9,
+  // 腕
+  shoulderX: 2.4, shoulderY: 5.4, shoulderZ: 4.2,
+  leanFwd: 2.6, leanDrop: 1.1,  // スティック上（乗り出す）で肩が前へ・下へ動く量
+  leanBack: 1.4, leanRise: 0.5, // スティック下（引く）で肩が後ろへ・上へ動く量
+  upperLen: 3.4, foreLen: 2.3,
+  upperPitch: 0.9,              // 上腕の向き（水平から下向き）
+  yawOut: 0.12, yawRange: 0.7,  // 腕の左右の向き
+  elbowBent: 1.25,              // トリガーを離したときのひじの曲がり（前腕が上を向いて手が上がる）
+  elbowStraight: 0.0,           // トリガーを奥まで押したとき（腕がまっすぐ伸びて手が下がる）
+  jointK: 45, jointD: 8,        // 肩のバネ（少し遅れて、勢いで行き過ぎる）
+  elbowK: 90, elbowD: 12,       // ひじのバネ（すばやい。トリガーを一気に引くと勢いよく下りる）
+  armK: 0.25, armKy: 0.05,      // 手が腕の位置へ戻る強さ（前後左右／上下。上下はやわらかく、生地に押し返されると浮く）
+  handDamp: 0.85,
+  support: 1.0,                 // 生地がめん棒を押し返す強さ
+  goodSink: 0.35,               // めん棒が生地の厚さのこの割合めり込むと「押す強さ 1」（よくのびる）
+  overSink: 0.65, overHold: 0.3,  // めん棒が生地の厚さのこの割合以上めり込んだままだと破れる // 押す強さがこれを超えたままだと破れる
+  slamSpeed: 3.0,                 // めん棒がこの速さ以上で生地に当たると、叩きつけて穴があく
+  // 生地
+  spacing: 0.42, RX: 1.7, RY: 1.05, RZ: 1.7,
+  gravity: 26, damping: 0.985, iterations: 8,
+  stiff: 0.5, yieldS: 0.2, plast: 2, recov: 0,
+  fric: 0.85, pinGrip: 0.15,
+  rollRate: 0.022,              // 押しながら転がした距離あたりの伸び
+  elongTear: 2.6,
+  lopGain: 3, lopDecay: 0.03, lopTear: 0.12, // めん棒が傾いたまま転がした分のかたより
+  tiltOk: 0.45,                 // これくらいの傾きなら大丈夫
+  R0: 1.7,
+  TEAR: 1.15, TEAR_HOLD: 0.3,
+  BW: 5.5, BD: 3.8,
+  targetR: 2.5,
+  FALL_FRAC: 0.5,
+  FAIL_SHOW: 0.8, deadzone: 0.1, stickCurve: 0.9,
+};
+const TARGET = new THREE.Vector3(0, 0, 0);
+
+// =====================================================================
+// three.js
+// =====================================================================
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#2a1d13');
+const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
+scene.add(new THREE.HemisphereLight('#fff4e0', '#5a3a20', 0.9));
+const sun = new THREE.DirectionalLight('#fff1dc', 1.5);
+sun.position.set(-3, 16, 6); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -11, right: 11, top: 9, bottom: -9, near: 1, far: 40 });
+scene.add(sun);
+
+function woodTexture(w, h, base, seed0) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const b = c.getContext('2d');
+  b.fillStyle = base; b.fillRect(0, 0, w, h);
+  let seed = seed0; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 80; i++) {
+    const y0 = rnd() * h, amp = 2 + rnd() * 8, freq = 0.003 + rnd() * 0.008, ph = rnd() * 6;
+    b.strokeStyle = `rgba(${110 + rnd() * 40 | 0},${65 + rnd() * 30 | 0},25,${0.06 + rnd() * 0.14})`;
+    b.lineWidth = 1 + rnd() * 3; b.beginPath();
+    for (let x = 0; x <= w; x += 8) { const y = y0 + Math.sin(x * freq + ph) * amp; x ? b.lineTo(x, y) : b.moveTo(x, y); }
+    b.stroke();
+  }
+  for (let i = 0; i < 2000; i++) { b.fillStyle = `rgba(255,252,240,${rnd() * 0.22})`; b.beginPath(); b.arc(rnd() * w, rnd() * h, rnd() * 2.2, 0, 7); b.fill(); }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; return t;
+}
+const counter = new THREE.Mesh(new THREE.BoxGeometry(60, 1, 40), new THREE.MeshStandardMaterial({ map: woodTexture(1024, 1024, '#5b3f29', 3), roughness: 0.9 }));
+counter.position.y = -1.0; counter.receiveShadow = true; scene.add(counter);
+const boardMat = new THREE.MeshStandardMaterial({ map: woodTexture(1600, 1000, '#d9ab72', 7), roughness: 0.75 });
+const sideMat = new THREE.MeshStandardMaterial({ color: '#b98650', roughness: 0.8 });
+const boardMesh = new THREE.Mesh(new THREE.BoxGeometry(CFG.BW * 2, 0.5, CFG.BD * 2), [sideMat, sideMat, boardMat, sideMat, sideMat, sideMat]);
+boardMesh.position.y = -0.25; boardMesh.receiveShadow = true; scene.add(boardMesh);
+// 目標の円
+const ring = new THREE.Mesh(new THREE.RingGeometry(CFG.targetR - 0.06, CFG.targetR + 0.06, 96),
+  new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.6, depthWrite: false }));
+ring.rotation.x = -Math.PI / 2; ring.position.y = 0.015; ring.visible = false; // 目標の輪は表示しない
+const sizeRing = new THREE.Mesh(new THREE.RingGeometry(0.97, 1.0, 96),
+  new THREE.MeshBasicMaterial({ color: '#ffd24a', transparent: true, opacity: 0.85, depthWrite: false }));
+sizeRing.position.y = 0.02; scene.add(sizeRing);
+
+// 生地の見た目
+const MC_S = 6.2, MC_RES = 52;
+const doughMat = new THREE.MeshStandardMaterial({ color: '#ecd9b2', roughness: 0.8 });
+const mc = new MarchingCubes(MC_RES, doughMat, false, false, 120000);
+mc.scale.set(MC_S, MC_S, MC_S); mc.castShadow = true; mc.receiveShadow = true; mc.isolation = 80;
+scene.add(mc);
+const BALL = 0.055, SUB = 12;
+
+// めん棒と手
+const pinGroup = new THREE.Group();
+const pinWood = new THREE.MeshStandardMaterial({ color: '#c9925a', roughness: 0.55 });
+const pinBody = new THREE.Mesh(new THREE.CylinderGeometry(CFG.pinR, CFG.pinR, CFG.pinLen - 1.6, 24), pinWood);
+pinBody.rotation.z = Math.PI / 2; pinGroup.add(pinBody);
+for (const s of [-1, 1]) {
+  const hdl = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.2, 0.8, 14), pinWood);
+  hdl.rotation.z = Math.PI / 2; hdl.position.x = s * (CFG.pinLen / 2 - 0.4); pinGroup.add(hdl);
+}
+// 転がっているのが分かる線
+const stripe = new THREE.Mesh(new THREE.BoxGeometry(CFG.pinLen - 1.7, 0.04, 0.06), new THREE.MeshStandardMaterial({ color: '#8a5a30' }));
+stripe.position.y = CFG.pinR; const roller = new THREE.Group(); roller.add(pinBody.clone()); roller.add(stripe);
+pinGroup.remove(pinBody); pinGroup.add(roller);
+roller.children[0].rotation.z = Math.PI / 2;
+pinGroup.traverse(o => { if (o.isMesh) o.castShadow = true; });
+scene.add(pinGroup);
+const skinMat = new THREE.MeshStandardMaterial({ color: '#f1c49c', roughness: 0.65 });
+const sleeveMats = [new THREE.MeshStandardMaterial({ color: '#4a8fd8', roughness: 0.8 }), new THREE.MeshStandardMaterial({ color: '#d8604f', roughness: 0.8 })];
+// 腕：肩・上腕（袖）・ひじ・前腕（ぶら下がり）・手（めん棒を握る）
+function cylBetween(mesh, a, b) {
+  const d = b.clone().sub(a); const len = d.length() || 1e-4;
+  mesh.position.copy(a).addScaledVector(d, 0.5);
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.divideScalar(len));
+  mesh.scale.set(1, len, 1);
+}
+function makeArm(i) {
+  const shoulder = new THREE.Mesh(new THREE.SphereGeometry(0.5, 16, 12), sleeveMats[i]);
+  const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.36, 1, 16), sleeveMats[i]);
+  const elbow = new THREE.Mesh(new THREE.SphereGeometry(0.36, 16, 12), sleeveMats[i]);
+  const fore = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.24, 1, 16), skinMat);
+  const fist = new THREE.Mesh(new THREE.SphereGeometry(0.4, 18, 14), skinMat); fist.scale.set(1.1, 0.9, 1);
+  for (const o of [shoulder, upper, elbow, fore, fist]) { o.castShadow = true; scene.add(o); }
+  return { shoulder, upper, elbow, fore, fist };
+}
+const armMeshes = [makeArm(0), makeArm(1)];
+
+// =====================================================================
+// 生地
+// =====================================================================
+let parts = [], springs = [];
+let pinTouch = 0, shapeT = 0, lop = 0, shake = 0, wasTouching = false, lastHit = 0;
+let tension = 0, overT = 0, cover = 0, round = 0, failing = null, respawnT = 0, fails = 0, done = false;
+let startTime = null, endTime = null, spawning = false, edgeWarn = 0;
+function spawnDough(drop) {
+  parts = []; springs = [];
+  const s = CFG.spacing, { RX, RY, RZ } = CFG, pr = s * 0.5, y0 = RY + pr + (drop ? 6 : 0);
+  for (let x = -RX; x <= RX + 1e-6; x += s) for (let y = -RY; y <= RY + 1e-6; y += s) for (let z = -RZ; z <= RZ + 1e-6; z += s) {
+    if ((x * x) / (RX * RX) + (y * y) / (RY * RY) + (z * z) / (RZ * RZ) > 1) continue;
+    const p = new THREE.Vector3(TARGET.x + x + (Math.random() - .5) * 0.04, y0 + y, TARGET.z + z + (Math.random() - .5) * 0.04);
+    parts.push({ p, q: p.clone() });
+  }
+  for (let i = 0; i < parts.length; i++) for (let j = i + 1; j < parts.length; j++) {
+    const d = parts[i].p.distanceTo(parts[j].p);
+    const v0 = parts[j].p.clone().sub(parts[i].p);
+    if (d < s * 1.5) springs.push({ a: parts[i], b: parts[j], rest0: d, rest: d, near: true, v0 });
+    else if (d < s * 1.9) springs.push({ a: parts[i], b: parts[j], rest0: d, rest: d, near: false, v0 });
+  }
+  shapeM = { a: 1, b: 0, c: 1 }; thin = 1;
+  lop = 0;
+  tension = 0; overT = 0; failing = null; respawnT = 0; spawning = !!drop; done = false;
+  $('done').style.display = 'none';
+}
+// 生地の形：水平の伸び（2×2 の対称行列）。厚さは体積が変わらないように 1/面積倍
+//   めん棒を押しながら転がすと、転がした向きに伸びて薄くなる（どの向きから転がしたかで形が決まる）
+let shapeM = { a: 1, b: 0, c: 1 }, thin = 1;
+function rollShape(ux, uz, amt) {
+  // M ← (I + amt·u uᵀ) · M
+  const e00 = 1 + amt * ux * ux, e01 = amt * ux * uz, e11 = 1 + amt * uz * uz;
+  const { a, b, c } = shapeM;
+  const na = e00 * a + e01 * b, nb = e00 * b + e01 * c, nb2 = e01 * a + e11 * b, nc = e01 * b + e11 * c;
+  shapeM = { a: na, b: (nb + nb2) / 2, c: nc };
+  thin = shapeM.a * shapeM.c - shapeM.b * shapeM.b; // 面積の倍率＝薄さ
+}
+// 生地の大きさと細長さ（形の行列の固有値）
+// 今の生地の厚さ（のばすほど薄い）
+const doughThick = () => 2 * CFG.RY * 0.9 / Math.max(1, thin);
+function shapeInfo() {
+  const { a, b, c } = shapeM, tr = (a + c) / 2, disc = Math.sqrt(((a - c) / 2) ** 2 + b * b);
+  const l1 = tr + disc, l2 = Math.max(1e-3, tr - disc);
+  return { l1, l2, theta: 0.5 * Math.atan2(2 * b, a - c), size: CFG.R0 * Math.sqrt(l1 * l2), elong: l1 / l2 };
+}
+function applyShape() {
+  const { a, b, c } = shapeM, sy = 1 / Math.max(1e-3, a * c - b * b);
+  for (const sp of springs) {
+    const v = sp.v0;
+    const r0 = Math.hypot(a * v.x + b * v.z, sy * v.y, b * v.x + c * v.z);
+    sp.rest *= r0 / sp.rest0; sp.rest0 = r0;
+  }
+}
+
+function resetGame() { fails = 0; startTime = null; endTime = null; spawnDough(false); resetPin(); }
+const centroid = () => { const c = new THREE.Vector3(); for (const p of parts) c.add(p.p); return c.divideScalar(Math.max(1, parts.length)); };
+const onBoard = p => Math.abs(p.x) < CFG.BW && Math.abs(p.z) < CFG.BD;
+
+// =====================================================================
+// 入力・めん棒
+// =====================================================================
+const keys = {};
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'KeyR') resetGame();
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+function stick(x, y) {
+  const m = Math.hypot(x, y);
+  if (m < CFG.deadzone) return [0, 0];
+  const n = Math.pow(Math.min(1, (m - CFG.deadzone) / (1 - CFG.deadzone)), CFG.stickCurve);
+  return [x / m * n, y / m * n];
+}
+let curPad = null, padName = '', startPrev = false, aPrev = false;
+function readInput() {
+  const inp = [{ x: 0, z: 0, grip: 0 }, { x: 0, z: 0, grip: 0 }];
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let pad = null; for (const p of pads) if (p && p.connected) { pad = p; break; }
+  curPad = pad; padName = pad ? pad.id : '';
+  if (pad) {
+    const b = i => pad.buttons[i] ? pad.buttons[i].value : 0;
+    [inp[0].x, inp[0].z] = stick(pad.axes[0] || 0, pad.axes[1] || 0);
+    [inp[1].x, inp[1].z] = stick(pad.axes[2] || 0, pad.axes[3] || 0);
+    inp[0].grip = b(6); inp[1].grip = b(7);
+    const st = b(9) > 0.5, a = b(0) > 0.5;
+    if ((st && !startPrev) || (a && !aPrev && done)) resetGame();
+    startPrev = st; aPrev = a;
+  }
+  const k = c => keys[c] ? 1 : 0;
+  inp[0].x += k('KeyD') - k('KeyA'); inp[0].z += k('KeyS') - k('KeyW');
+  inp[1].x += k('ArrowRight') - k('ArrowLeft'); inp[1].z += k('ArrowDown') - k('ArrowUp');
+  if (keys.KeyQ) inp[0].grip = 1;
+  if (keys.KeyM) inp[1].grip = 1;
+  return inp;
+}
+function rumble(strong, weak, ms) {
+  const act = curPad && curPad.vibrationActuator;
+  if (act && act.playEffect) act.playEffect('dual-rumble', { duration: ms, strongMagnitude: Math.min(1, strong), weakMagnitude: Math.min(1, weak) }).catch(() => {});
+}
+
+// 腕：肩（スティック）とひじ（トリガー）を別々に動かす。手はめん棒の両端を握っている
+const hands = [0, 1].map(i => {
+  const side = i ? 1 : -1;
+  const S = new THREE.Vector3(side * CFG.shoulderX, CFG.shoulderY, CFG.shoulderZ);
+  const p = new THREE.Vector3(side * CFG.gripHalf, 3, 0.5);
+  return { i, side, S, Snow: S.clone(), lean: 0, lv: 0, yaw: side * CFG.yawOut, yv: 0, bend: CFG.elbowBent, bv: 0,
+    elbow: new THREE.Vector3(), target: new THREE.Vector3(), p, q: p.clone(), pos: p, press: 0, pe: 0, overT: 0, raw: 0 };
+});
+const pin = { a: new THREE.Vector3(), b: new THREE.Vector3(), prevMid: new THREE.Vector3(), vel: new THREE.Vector3(), roll: 0, axis: new THREE.Vector3(1, 0, 0) };
+function resetPin() {
+  for (const h of hands) { h.lean = 0; h.lv = 0; h.yaw = h.side * CFG.yawOut; h.yv = 0; h.bend = CFG.elbowBent; h.bv = 0; h.overT = 0; armFK(h); h.p.copy(h.target); h.q.copy(h.p); }
+  pin.init = false;
+}
+// 腕の形から、手が行こうとする位置を計算する
+function armFK(h) {
+  const l = h.lean;
+  h.Snow.set(h.S.x, h.S.y + (l > 0 ? -l * CFG.leanDrop : -l * CFG.leanRise), h.S.z + (l > 0 ? -l * CFG.leanFwd : -l * CFG.leanBack));
+  const up = CFG.upperPitch, cy = Math.sin(h.yaw), cz = -Math.cos(h.yaw);
+  h.elbow.set(cy * Math.cos(up), -Math.sin(up), cz * Math.cos(up)).multiplyScalar(CFG.upperLen).add(h.Snow);
+  const fp = up - h.bend; // ひじを曲げるほど前腕が上を向く
+  h.target.set(cy * Math.cos(fp), -Math.sin(fp), cz * Math.cos(fp)).multiplyScalar(CFG.foreLen).add(h.elbow);
+}
+function updatePin(dt) {
+  const inp = readInput();
+  if (startTime === null && inp.some(n => Math.hypot(n.x, n.z) > 0.2 || n.grip > 0.2)) startTime = performance.now();
+  // ---- 関節：肩（スティック上下＝乗り出す・引く、左右＝腕を振る）、ひじ（トリガー＝伸ばす） ----
+  hands.forEach((h, i) => {
+    const n = inp[i];
+    const tLean = -THREE.MathUtils.clamp(n.z, -1, 1); // 上＝乗り出す
+    const tYaw = h.side * CFG.yawOut + THREE.MathUtils.clamp(n.x, -1, 1) * CFG.yawRange;
+    h.raw = failing || done ? 0 : THREE.MathUtils.clamp(n.grip, 0, 1);
+    const tBend = CFG.elbowBent + (CFG.elbowStraight - CFG.elbowBent) * h.raw;
+    h.lv += (CFG.jointK * (tLean - h.lean) - CFG.jointD * h.lv) * dt; h.lean += h.lv * dt;
+    h.yv += (CFG.jointK * (tYaw - h.yaw) - CFG.jointD * h.yv) * dt; h.yaw += h.yv * dt;
+    h.bv += (CFG.elbowK * (tBend - h.bend) - CFG.elbowD * h.bv) * dt; h.bend += h.bv * dt;
+    armFK(h);
+  });
+  // ---- 手：腕の位置へ引っぱられる。生地に押し返されると浮く（step の中） ----
+  for (const h of hands) {
+    const v = h.p.clone().sub(h.q).multiplyScalar(CFG.handDamp);
+    h.q.copy(h.p); h.p.add(v);
+  }
+  for (let it = 0; it < 8; it++) {
+    for (const h of hands) {
+      // 前後左右はしっかり腕についていく。上下はやわらかめ（生地に押し返されると浮く＝押しつける強さになる）
+      h.p.x += (h.target.x - h.p.x) * CFG.armK; h.p.z += (h.target.z - h.p.z) * CFG.armK;
+      h.p.y += (h.target.y - h.p.y) * CFG.armKy;
+    }
+    // めん棒の長さは一定（両手の間）
+    const [L, R] = hands;
+    const d = R.p.clone().sub(L.p), len = d.length() || 1e-4, diff = (len - CFG.gripHalf * 2) / len * 0.5;
+    L.p.addScaledVector(d, diff); R.p.addScaledVector(d, -diff);
+    for (const h of hands) if (h.p.y < CFG.pinR) { h.p.y = CFG.pinR; if (h.q.y < h.p.y) h.q.y = h.p.y; }
+  }
+  // めん棒
+  const dir = hands[1].p.clone().sub(hands[0].p).normalize();
+  pin.axis.copy(dir);
+  const ext = CFG.pinLen / 2 - CFG.gripHalf;
+  pin.a.copy(hands[0].p).addScaledVector(dir, -ext);
+  pin.b.copy(hands[1].p).addScaledVector(dir, ext);
+  const mid = hands[0].p.clone().add(hands[1].p).multiplyScalar(0.5);
+  if (!pin.init) { pin.prevMid.copy(mid); pin.init = true; }
+  pin.vel.copy(mid).sub(pin.prevMid).divideScalar(Math.max(dt, 1e-4)); pin.prevMid.copy(mid);
+  const perp = new THREE.Vector3(-dir.z, 0, dir.x);
+  pin.roll += pin.vel.dot(perp) * dt / CFG.pinR;
+  // 押す強さ：腕が生地の中までどれだけ入り込もうとしているか
+  for (const h of hands) {
+    // 押す強さ ＝ めん棒が生地にどれだけめり込んでいるか（生地の厚さに対して）。触れていなければ 0
+    h.sink = 1 - (h.p.y - CFG.pinR) / doughThick();
+    h.pe = (h.cont || 0) > 0.002 ? Math.max(0, h.sink / CFG.goodSink) : 0;
+    h.press += (Math.min(2, h.pe) - h.press) * Math.min(1, dt * 12);
+  }
+}
+
+// =====================================================================
+// 物理
+// =====================================================================
+const segClosest = (p, a, b, out) => { const ab = b.clone().sub(a); const t = THREE.MathUtils.clamp(p.clone().sub(a).dot(ab) / ab.lengthSq(), 0, 1); return out.copy(a).addScaledVector(ab, t); };
+function step(dt) {
+  const pr = CFG.spacing * 0.5, minD = CFG.spacing * 0.85, g = CFG.gravity * dt * dt;
+  for (const pt of parts) {
+    const p = pt.p, q = pt.q;
+    const vx = (p.x - q.x) * CFG.damping, vy = (p.y - q.y) * CFG.damping, vz = (p.z - q.z) * CFG.damping;
+    q.copy(p); p.x += vx; p.y += vy - g; p.z += vz;
+  }
+  const cp = new THREE.Vector3(), perp = new THREE.Vector3(-pin.axis.z, 0, pin.axis.x);
+  const pinRR = CFG.pinR + pr;
+  for (let it = 0; it < CFG.iterations; it++) {
+    for (const sp of springs) {
+      const a = sp.a.p, b = sp.b.p;
+      const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+      const d = Math.hypot(dx, dy, dz) || 1e-5;
+      const f = (d - sp.rest) / d * (sp.near ? CFG.stiff : CFG.stiff * 0.5) * 0.5;
+      a.x += dx * f; a.y += dy * f; a.z += dz * f;
+      b.x -= dx * f; b.y -= dy * f; b.z -= dz * f;
+    }
+    if (it === 0 || it === CFG.iterations - 1) {
+      for (let i = 0; i < parts.length; i++) {
+        const a = parts[i].p;
+        for (let j = i + 1; j < parts.length; j++) {
+          const b = parts[j].p;
+          const dx = b.x - a.x; if (dx > minD || dx < -minD) continue;
+          const dy = b.y - a.y; if (dy > minD || dy < -minD) continue;
+          const dz = b.z - a.z; if (dz > minD || dz < -minD) continue;
+          const d = Math.hypot(dx, dy, dz) || 1e-5;
+          if (d >= minD) continue;
+          const f = (d - minD) / d * 0.5;
+          a.x += dx * f; a.y += dy * f; a.z += dz * f;
+          b.x -= dx * f; b.y -= dy * f; b.z -= dz * f;
+        }
+      }
+    }
+    // めん棒：生地を押しのける。下に押しつぶされた分は、めん棒の前後へ逃がす（＝のびる）
+    let penA = 0, penB = 0;
+    const ab = pin.b.clone().sub(pin.a), abl2 = ab.lengthSq();
+    for (const pt of parts) {
+      // めん棒は上から押す：めん棒の真下にある生地を、めん棒の下面の高さまで押し下げる
+      const tt = THREE.MathUtils.clamp(pt.p.clone().sub(pin.a).dot(ab) / abl2, 0, 1);
+      cp.copy(pin.a).addScaledVector(ab, tt);
+      const hx = pt.p.x - cp.x, hz = pt.p.z - cp.z;
+      const dh = Math.abs(hx * perp.x + hz * perp.z);          // めん棒の軸からの水平距離
+      const along = Math.hypot(hx, hz) - dh;                    // 端より外側か
+      if (dh >= pinRR || along > 0.05 || tt <= 0 || tt >= 1) continue;
+      const bottom = cp.y - Math.sqrt(pinRR * pinRR - dh * dh);
+      if (pt.p.y <= bottom || pt.p.y > cp.y + pinRR) continue;
+      const pen = pt.p.y - bottom;
+      pt.p.y = bottom; pt.q.y -= Math.min(pen, pt.q.y - bottom > 0 ? pt.q.y - bottom : 0); // 押し下げても勢いはつけない（はじけ飛ばない）
+      penA += pen * (1 - tt); penB += pen * tt;
+      // めん棒を動かすと、その下の生地も少し引きずられる
+      const grip = CFG.pinGrip / CFG.iterations;
+      pt.p.x += pin.vel.x / 60 * grip; pt.p.z += pin.vel.z / 60 * grip;
+      pt.q.x += pin.vel.x / 60 * grip; pt.q.z += pin.vel.z / 60 * grip;
+    }
+    if (it === 0) pinTouch = penA + penB;
+    // 生地がめん棒を押し返す（手ごと持ち上がる）
+    if (it === 0) { hands[0].cont = 0; hands[1].cont = 0; }
+    hands[0].cont = Math.max(hands[0].cont, penA); hands[1].cont = Math.max(hands[1].cont, penB);
+    hands[0].p.y += Math.min(0.3, penA * CFG.support) / CFG.iterations;
+    hands[1].p.y += Math.min(0.3, penB * CFG.support) / CFG.iterations;
+    // 床
+    for (const pt of parts) {
+      const floor = onBoard(pt.p) ? pr : -0.5 + pr;
+      if (pt.p.y < floor) pt.p.y = floor;
+    }
+  }
+  for (const pt of parts) {
+    const floor = onBoard(pt.p) ? pr : -0.5 + pr;
+    if (pt.p.y <= floor + 0.01) { pt.q.x += (pt.p.x - pt.q.x) * CFG.fric; pt.q.z += (pt.p.z - pt.q.z) * CFG.fric; if (pt.q.y < pt.p.y) pt.q.y = pt.p.y; }
+  }
+  // めん棒を押しながら転がすと、その向きに伸びる
+  lop = Math.max(0, lop - CFG.lopDecay * dt);
+  // ---- 叩きつけ：めん棒が勢いよく生地に当たった ----
+  const touching = pinTouch > 0.02 || hands.some(h => h.cont > 0.002);
+  if (!failing && !done && touching && !wasTouching) {
+    const vDown = -Math.min(hands[0].p.y - hands[0].q.y, hands[1].p.y - hands[1].q.y) / dt;
+    lastHit = vDown;
+    if (vDown > CFG.slamSpeed) tear('叩きつけて穴があいた！');
+    else if (vDown > CFG.slamSpeed * 0.5) { rumble(0.5, 0.3, 80); puff(centroid().setY(0.4), 8, 0.6); }
+  }
+  wasTouching = touching;
+  if (!failing && !done && touching) {
+    const pL = Math.min(1, hands[0].press), pR = Math.min(1, hands[1].press); // 強く押しても、それ以上はのびない（破れやすくなるだけ）
+    const press = (pL + pR) / 2;
+    const roll = Math.abs(pin.vel.x * perp.x + pin.vel.z * perp.z) * dt;
+    const amt = CFG.rollRate * roll * press * press;
+    if (amt > 0) { rollShape(perp.x, perp.z, amt); shapeT += amt; if (shapeT > 0.01) { shapeT = 0; applyShape(); } }
+    // 左右で押す強さがちがうまま転がすと、片側だけ薄くなる
+    // めん棒が傾いている（左右の手の高さがちがう）まま転がすと、低い側だけ薄くなる
+    const tilt = Math.abs(hands[0].p.y - hands[1].p.y);
+    lop += CFG.rollRate * roll * Math.max(0, tilt - CFG.tiltOk) * CFG.lopGain * (0.5 + press);
+    if (lop > CFG.lopTear) { lop = 0; tear('片側だけ薄くなって破れた！'); }
+    // 押しつけすぎ
+    // 押しつけすぎ：めん棒が生地の厚さの半分以上めり込んでいる
+    for (const h of hands) {
+      if (h.cont > 0.002 && h.sink > CFG.overSink) { h.overT += dt; if (h.overT > CFG.overHold) { h.overT = 0; tear('押しつけすぎて破れた！'); } }
+      else h.overT = Math.max(0, h.overT - dt * 2);
+    }
+    // 同じ向きにばかり転がすと細長くなりすぎて裂ける
+    if (shapeInfo().elong > CFG.elongTear) tear('細長くのばしすぎて裂けた！');
+  }
+  // 張り（ちぎれの判定）
+  const arr = [];
+  for (const sp of springs) if (sp.near) arr.push((sp.a.p.distanceTo(sp.b.p) - sp.rest) / sp.rest);
+  arr.sort((x, y) => y - x);
+  let sum = 0; const n8 = Math.min(8, arr.length); for (let i = 0; i < n8; i++) sum += arr[i];
+  tension += ((n8 ? sum / n8 : 0) - tension) * Math.min(1, dt * 15);
+  overT = 0;
+  // 塑性：のびた形がそのまま残る（めん棒でのばした生地は戻らない）
+  const pl = Math.min(1, CFG.plast * dt);
+  for (const sp of springs) {
+    const len = sp.a.p.distanceTo(sp.b.p), strain = (len - sp.rest) / sp.rest;
+    if (Math.abs(strain) > CFG.yieldS) sp.rest += (len - Math.sign(strain) * CFG.yieldS * sp.rest - sp.rest) * pl;
+    sp.rest += (sp.rest0 - sp.rest) * Math.min(1, CFG.recov * dt);
+    sp.rest = THREE.MathUtils.clamp(sp.rest, sp.rest0 * 0.4, sp.rest0 * 4);
+  }
+  if (spawning) { let minY = Infinity; for (const pt of parts) minY = Math.min(minY, pt.p.y); if (minY < pr + 0.05) { spawning = false; puff(centroid().setY(0.1), 26, 1); } }
+  // まな板から落ちる
+  if (!failing && !done && !spawning) {
+    let out = 0; for (const pt of parts) if (!onBoard(pt.p)) out++;
+    const frac = out / parts.length; edgeWarn = Math.min(1, frac / CFG.FALL_FRAC);
+    if (frac >= CFG.FALL_FRAC) fail('落ちた！');
+  }
+  const si = shapeInfo(); round = si.l2 / si.l1;
+  if (!failing && !done && !spawning && si.size >= CFG.targetR) finish();
+}
+
+// 目標の円がどれだけ埋まったか・どれだけ丸いか
+const SAMPLES = [];
+for (let r = 0.3; r < CFG.targetR; r += 0.45) { const n = Math.max(6, Math.round(2 * Math.PI * r / 0.45)); for (let k = 0; k < n; k++) { const a = k / n * Math.PI * 2; SAMPLES.push([Math.cos(a) * r, Math.sin(a) * r]); } }
+function measureCover() {
+  let hit = 0;
+  const R2 = 0.4 * 0.4;
+  for (const [sx, sz] of SAMPLES) {
+    for (const pt of parts) { const dx = pt.p.x - (TARGET.x + sx), dz = pt.p.z - (TARGET.z + sz); if (dx * dx + dz * dz < R2 && pt.p.y < 1.2) { hit++; break; } }
+  }
+  cover = hit / SAMPLES.length;
+  // 丸さ：8方向の端までの距離の 最小 / 最大
+  const c = centroid(); const ext = new Array(8).fill(0);
+  for (const pt of parts) {
+    const dx = pt.p.x - c.x, dz = pt.p.z - c.z, a = Math.atan2(dz, dx);
+    const k = ((Math.round(a / (Math.PI / 4)) % 8) + 8) % 8;
+    ext[k] = Math.max(ext[k], Math.hypot(dx, dz));
+  }
+  const mx = Math.max(...ext), mn = Math.min(...ext);
+  round = mx > 0 ? mn / mx : 0;
+}
+
+function tear(reason = 'ちぎれた！（穴があいた）') {
+  // 一番伸びた所で裂ける
+  let worst = null, ws = 0;
+  for (const sp of springs) { const s = (sp.a.p.distanceTo(sp.b.p) - sp.rest) / sp.rest; if (s > ws) { ws = s; worst = sp; } }
+  if (!worst) return;
+  const m = worst.a.p.clone().add(worst.b.p).multiplyScalar(0.5), R2 = (CFG.spacing * 3) ** 2;
+  springs = springs.filter(sp => { const c = sp.a.p.clone().add(sp.b.p).multiplyScalar(0.5); return c.distanceToSquared(m) > R2; });
+  puff(m, 20, 1.1);
+  fail(reason, m);
+}
+function fail(reason, at) {
+  if (failing || done) return;
+  failing = { reason, t: 0 }; fails++;
+  popup((at || centroid()).clone().setY(2.4), reason, '#ff7a5c', true);
+  rumble(1, 0.8, 300);
+}
+function finish() {
+  done = true; endTime = performance.now();
+  const name = round >= 0.75 ? 'まんまるピザ生地！' : round >= 0.55 ? 'ちょっと楕円のピザ生地' : 'いびつな生地…';
+  const comment = round >= 0.75 ? 'きれいにまんまるにのばせた！' : round >= 0.55 ? '少し偏ったけど、ちゃんと薄くのびた。' : '同じ向きばかりのばしたかも。いろんな向きから転がそう。';
+  $('done').querySelector('b').textContent = name;
+  $('doneSub').textContent = `${comment}\n丸さ ${Math.round(round * 100)}%　タイム ${fmtTime(endTime - (startTime || endTime))}　失敗 ${fails}回\nStart / R でもう一度`;
+  $('done').style.display = 'block';
+  rumble(1, 1, 400);
+  puff(centroid(), 50, 1.4);
+}
+
+// =====================================================================
+// 演出
+// =====================================================================
+const PN = 400;
+const pPos = new Float32Array(PN * 3).fill(-100), pVel = new Float32Array(PN * 3), pLife = new Float32Array(PN);
+const pGeo = new THREE.BufferGeometry(); pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+scene.add(new THREE.Points(pGeo, new THREE.PointsMaterial({ color: '#fffaf0', size: 0.1, transparent: true, opacity: 0.85, depthWrite: false })));
+let pNext = 0;
+function puff(at, n, power) {
+  for (let i = 0; i < n; i++) {
+    const j = pNext; pNext = (pNext + 1) % PN;
+    const a = Math.random() * Math.PI * 2, sp = (1 + Math.random() * 3) * power;
+    pPos[j * 3] = at.x + Math.cos(a) * 0.8; pPos[j * 3 + 1] = Math.max(0.05, at.y); pPos[j * 3 + 2] = at.z + Math.sin(a) * 0.8;
+    pVel[j * 3] = Math.cos(a) * sp; pVel[j * 3 + 1] = 1 + Math.random() * 2.5 * power; pVel[j * 3 + 2] = Math.sin(a) * sp;
+    pLife[j] = 0.5 + Math.random() * 0.7;
+  }
+}
+const tmpV = new THREE.Vector3();
+function popup(at, text, col, big) {
+  tmpV.copy(at).project(camera);
+  const el = document.createElement('div');
+  el.className = 'pop'; el.textContent = text;
+  el.style.left = ((tmpV.x + 1) / 2 * innerWidth) + 'px';
+  el.style.top = ((1 - tmpV.y) / 2 * innerHeight) + 'px';
+  el.style.color = col; el.style.fontSize = (big ? 28 : 20) + 'px';
+  $('pops').appendChild(el);
+  setTimeout(() => el.remove(), 1250);
+}
+function fmtTime(ms) { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+
+function syncScene(t) {
+  mc.reset();
+  if (parts.length) {
+    mc.position.set(TARGET.x, MC_S - 1.0, TARGET.z);
+    const inv = 1 / (2 * MC_S);
+    for (const pt of parts) {
+      const bx = (pt.p.x - mc.position.x) * inv + 0.5, by = (pt.p.y - mc.position.y) * inv + 0.5, bz = (pt.p.z - mc.position.z) * inv + 0.5;
+      if (bx < 0.02 || bx > 0.98 || by < 0.02 || by > 0.98 || bz < 0.02 || bz > 0.98) continue;
+      mc.addBall(bx, by, bz, BALL, SUB);
+    }
+  }
+  mc.update();
+  doughMat.emissive.set('#ff3a1a').multiplyScalar(overT > 0 ? 0.25 + 0.2 * Math.sin(t * 40) : Math.max(Math.max(0, (tension - CFG.TEAR * 0.7) / (CFG.TEAR * 0.3)), Math.max(0, lop / CFG.lopTear - 0.4) / 0.6) * 0.3); // 片側だけ薄くなってくると赤く
+  // めん棒
+  const mid = pin.a.clone().add(pin.b).multiplyScalar(0.5);
+  pinGroup.position.copy(mid);
+  const d = pin.b.clone().sub(pin.a).normalize();
+  pinGroup.quaternion.setFromUnitVectors(new THREE.Vector3(1, 0, 0), d);
+  roller.rotation.x = pin.roll;
+  hands.forEach((h, i) => {
+    const m = armMeshes[i];
+    m.shoulder.position.copy(h.Snow);
+    m.elbow.position.copy(h.elbow);
+    cylBetween(m.upper, h.Snow, h.elbow);
+    const fist = h.p.clone().add(new THREE.Vector3(0, 0.12, 0));
+    cylBetween(m.fore, h.elbow, fist);
+    m.fist.position.copy(fist);
+    // めん棒に乗せた手のひらはぺたっと平たく
+    m.fist.scale.set(1.1, 0.9, 1);
+  });
+  // 今の生地の大きさ（黄色の輪）
+  const si = shapeInfo(), c = parts.length ? centroid() : TARGET;
+  sizeRing.visible = false; // 大きさの輪も表示しない（のばし具合はバーで見る）
+  sizeRing.position.set(c.x, 0.02, c.z);
+  sizeRing.rotation.set(-Math.PI / 2, 0, si.theta);
+  sizeRing.scale.set(CFG.R0 * Math.sqrt(si.l1), CFG.R0 * Math.sqrt(si.l2), 1);
+  const dangerE = (si.elong - 1) / (CFG.elongTear - 1);
+  sizeRing.material.color.set(dangerE > 0.75 ? '#ff6a4a' : '#ffd24a');
+}
+function updateFx(dt) {
+  for (let j = 0; j < PN; j++) {
+    if (pLife[j] <= 0) continue;
+    pLife[j] -= dt; pVel[j * 3 + 1] -= 8 * dt;
+    for (let k = 0; k < 3; k++) pPos[j * 3 + k] += pVel[j * 3 + k] * dt;
+    if (pPos[j * 3 + 1] < 0.03) { pPos[j * 3 + 1] = 0.03; pVel[j * 3] *= 0.5; pVel[j * 3 + 2] *= 0.5; pVel[j * 3 + 1] = 0; }
+    if (pLife[j] <= 0) pPos[j * 3 + 1] = -100;
+  }
+  pGeo.attributes.position.needsUpdate = true;
+}
+const avgPe = () => (hands[0].pe + hands[1].pe) / 2;
+function hud(now) {
+  const si = shapeInfo();
+  const prog = THREE.MathUtils.clamp((si.size - CFG.R0) / (CFG.targetR - CFG.R0), 0, 1);
+  $('cov').textContent = Math.round(prog * 100) + '%';
+  $('barFill').style.width = (prog * 100) + '%';
+  $('barGoal').style.left = '99%';
+  const tip = $('tip');
+  tip.className = failing || overT > 0 || edgeWarn > 0.4 ? 'warn' : '';
+  const touching = pinTouch > 0.02 || avgPe() > 0.05, avgP = (hands[0].press + hands[1].press) / 2;
+  const over = hands.some(h => (h.sink || 0) > CFG.overSink * 0.8 && h.cont > 0.002);
+  tip.className = failing || over || lop / CFG.lopTear > 0.6 ? 'warn' : '';
+  tip.textContent = failing ? '失敗… 新しい生地が来るよ'
+    : over ? '押しつけすぎ！ ひじを曲げて（トリガーをゆるめて）'
+    : lop / CFG.lopTear > 0.6 ? 'めん棒が傾いてる！ 片側だけ薄くなってる'
+    : (si.elong - 1) / (CFG.elongTear - 1) > 0.75 ? '細長くなりすぎ！ 向きを変えて転がそう'
+    : !touching ? 'めん棒が浮いてる：ひじを伸ばす（LT/RT）か、肩を乗り出して下げる'
+    : avgP < 0.3 ? '軽く触れているだけ：もう少し押しつけて転がそう'
+    : '前へ転がす＝肩を乗り出しながらひじを曲げる／戻す＝肩を引きながらひじを伸ばす';
+  const t = startTime === null ? 0 : (done ? endTime : now) - startTime;
+  $('stat').textContent = (fails ? '失敗 ' + fails + '　' : '') + '⏱ ' + fmtTime(t);
+  // 細長さメーター（右の赤まで行くと裂ける）
+  const de = (si.elong - 1) / (CFG.elongTear - 1);
+  $('gNeedle').style.left = Math.min(100, de * 85) + '%';
+  $('gauge').className = de > 0.75 ? 'danger' : '';
+  // 押す強さ（押しつけすぎると赤）
+  hands.forEach((h, i) => {
+    const el = $(i ? 'pressR' : 'pressL').querySelector('div');
+    el.style.height = (Math.min(1.5, h.press) / 1.5 * 130) + 'px';
+    el.style.background = (h.sink || 0) > CFG.overSink * 0.8 && h.cont > 0.002 ? '#ff4a2a' : 'linear-gradient(0deg,#f4d28a,#ff7a3c)';
+  });
+  $('help').textContent =
+    (padName ? '🎮 ' + padName.slice(0, 34) : '🎮 未接続（ボタンを押すと認識）') + '\n' +
+    '左右スティック上下：その側の肩を乗り出す／引く　左右：腕を振る　LT / RT：その腕のひじを伸ばす（離すと曲がって手が上がる）\n' +
+    'めん棒を転がす動きを、肩とひじに分けて組み立てる。勢いよく下ろすと叩きつけて穴があく／押しつけすぎると破れる\n' +
+    'キーボード：左 WASD・Q ／ 右 矢印・M ／ R やり直し';
+}
+
+// =====================================================================
+// ループ
+// =====================================================================
+const camBase = new THREE.Vector3();
+function resize() {
+  const w = Math.max(1, innerWidth), hh = Math.max(1, innerHeight);
+  renderer.setSize(w, hh); camera.aspect = w / hh; camera.updateProjectionMatrix();
+  const k = Math.max(1, 1.5 / camera.aspect);
+  camBase.set(0, 12 * k, 9.5 * k); camera.position.copy(camBase); camera.lookAt(0, 0, 0.6);
+}
+addEventListener('resize', resize);
+resize();
+resetGame();
+window.G = { get lop() { return lop; }, shapeInfo, get pinTouch() { return pinTouch; }, get parts() { return parts; }, hands, pin, CFG, get tension() { return tension; }, get cover() { return cover; }, get round() { return round; },
+  get fails() { return fails; }, get done() { return done; }, get failing() { return failing; }, centroid };
+
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(1 / 30, (now - last) / 1000); last = now;
+  if (renderer.domElement.width !== Math.round(innerWidth * renderer.getPixelRatio())) resize();
+  updatePin(dt);
+  if (parts.length) step(1 / 60);
+  if (failing) {
+    failing.t += dt;
+    if (failing.t >= CFG.FAIL_SHOW && parts.length) { parts = []; springs = []; respawnT = 0.3; }
+    if (respawnT > 0) { respawnT -= dt; if (respawnT <= 0) { respawnT = 0; spawnDough(true); } }
+  }
+  updateFx(dt);
+  shake *= Math.exp(-dt * 8);
+  camera.position.copy(camBase);
+  if (shake > 0.01) camera.position.add(new THREE.Vector3((Math.random() - .5) * shake, (Math.random() - .5) * shake, 0));
+  camera.lookAt(0, 0, 0.6);
+  syncScene(now / 1000);
+  hud(now);
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

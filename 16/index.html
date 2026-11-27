@@ -1,0 +1,1073 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>16 ひじを上げて体ごとこねる 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a1d13; }
+  canvas { display: block; }
+  body { font-family: "Hiragino Maru Gothic ProN", "Hiragino Sans", system-ui, sans-serif; color: #fff3e0; }
+  #panel {
+    position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+    width: min(420px, calc(100vw - 40px)); padding: 8px 14px 8px; border-radius: 12px;
+    background: rgba(40,25,15,.55); pointer-events: none;
+  }
+  #bar { height: 12px; border-radius: 6px; background: rgba(0,0,0,.35); overflow: hidden; }
+  #barFill { height: 100%; width: 0; background: linear-gradient(90deg,#d8c39a,#f4d28a,#ffb347); transition: width .2s; }
+  #stageName { font-size: 15px; font-weight: bold; text-align: center; margin-top: 4px; color: #ffe2a8; transition: color .3s; }
+  #row2 { display: flex; justify-content: space-between; font-size: 12px; margin-top: 5px; }
+  #tip.warn { color: #ff9b80; }
+  #help {
+    position: fixed; left: 12px; bottom: 10px; font-size: 12px; line-height: 1.6;
+    background: rgba(0,0,0,.4); padding: 6px 10px; border-radius: 8px; pointer-events: none; white-space: pre;
+  }
+  #done {
+    position: fixed; left: 50%; top: 68%; transform: translate(-50%, -50%); display: none;
+    background: rgba(40,25,15,.75); padding: 16px 30px; border-radius: 16px; text-align: center;
+  }
+  #done b { font-size: 32px; display: block; }
+  #doneSub { white-space: pre-line; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="panel">
+  <div id="bar"><div id="barFill"></div></div>
+  <div id="stageName"></div>
+  <div id="row2"><span id="tip"></span><span id="stat"></span></div>
+</div>
+<div id="done"><b>こね上がり！</b><span id="doneSub"></span></div>
+<div id="help"></div>
+<script type="module">
+import * as THREE from 'three';
+import { MarchingCubes } from 'three/addons/objects/MarchingCubes.js';
+
+const $ = id => document.getElementById(id);
+
+// =====================================================================
+// 16：歩くようにこねる（ひじ＝ひざ）
+//   RT / LT ＝ 右 / 左のひじを上げる（その手が生地から浮く）。離すと手が下りて、そこにつく
+//   左スティック上下 ＝ 体を前後に傾ける（ひじを上げている間だけ効く。上げた手も一緒に前後へ振れる）
+//   右スティック ＝ 上げた手の位置（どこをこねるか）を前後左右に動かす
+//
+//   両手をついている間は、体は手に支えられてその姿勢のまま止まっている（両足で立っているのと同じ）
+//   片手を上げると支えが半分になって、体が傾きはじめる。左スティックで体を前後に動かして、上げた手を次の場所へ
+//   体を前へ乗り出すと、ついている方の手が体重で生地を奥へ押し出す（＝こねる）。手を上げると押し出した生地が折り返る
+//   両手を上げる・傾きすぎる → 踏み台から落ちる
+//
+//   こねるほど生地の状態が変わり、こね方を変えさせられる（見た目もはっきり変わる）
+//     ふつう（0〜25%）：まずは基本のこね方に慣れる
+//     ゆるゆる（25〜50%）：生地がだれて広がる。ついた手が外へずるずる滑り、両手をついていても体が揺れる
+//     かたい（50〜75%）：深く前へ乗り出さないと押せない（乗り出しすぎると落ちる）
+//     ぷるぷる（75〜100%）：押した分だけ生地が押し返す。手を上げると体が後ろへはね返される
+// =====================================================================
+const CFG = {
+  // ---- 体 ----
+  hip: new THREE.Vector3(0, 2.4, 7.4), // 腰（踏み台の上）
+  torsoLen: 2.8, shoulderHalf: 1.35,
+  rest: 0.22,                 // ふだんの前傾（机に手をついて寄りかかっている）
+  tipG: 9,                    // 倒れようとする力
+  oneHand: 0.55,              // 片手だけついているとき、倒れようとする力がこの割合で残る（両手なら 0）
+  muscle: 6,                  // ひじを上げている間、左スティックで体を傾ける力
+  leanStick: 0.5,             // 左スティックで狙える傾き（前後）
+  holdD: 14,                  // 両手をついている間の揺れの止まり方
+  bodyD: 2.4,                 // 片手のときの揺れの減衰
+  latFall: 1.0,               // 片手を上げると、その側へ体が傾こうとする
+  latBack: 14,                // 両手をついていると、横の傾きはまっすぐへ戻る
+  wobble: 1.2,                // 踏み台のぐらつき（ランダム）
+  kick: 1.2, kickEvery: [3, 6], // ときどき踏み台がガタッとなる
+  fallFwd: 0.72, fallBack: 0.42, fallSide: 0.55, // これ以上傾くと転ぶ
+  // ---- 手 ----
+  reach0: 5.0,                // 上げた手の位置（肩からの前への距離）
+  swing: 1.8, swingBack: 0.8, // 上げた手を左スティックで前へ／手前へ振れる量
+  dropSpeed: 6,               // ひじを下ろした時に手が下へ落ちる勢い
+  foreLen: 2.0,               // 前腕の長さ（ひじから手まで）
+  elbowFollow: 9,             // ひじが狙った位置へ動く速さ
+  elbowDrop: 16,              // トリガーを離した時、ひじが下がる速さ
+  handG: 60, handDamp: 0.985, // ぶら下がった手の重さと、揺れの残り方
+  lift: 1.4,                  // 上げた手の高さ（生地の上から）
+  liftAt: 0.15,               // トリガーをこれ以上押すとひじが上がる
+  inward: 0.65,               // 手は肩より内側（両手とも生地の上に来る）
+  handK: 60, handD: 10,       // 上げた手のバネ
+  pushFwd: 0.8,               // ついた手は、体が前へ出た分のこの割合だけ生地を奥へ押し出す
+  pushBack: 0.25,             // 体が後ろへ下がると、ついた手も少し手前へ引きずられる
+  pressDepth: 1.05,           // 体重がかかっている手が生地にめり込む深さ
+  contactR: 0.8,              // 手のひらが生地に触れる半径
+  stretchPer: 1.4,            // 押し出した距離1あたり、生地が奥へ伸びる割合
+  stretchMax: 2.6,
+  holdBack: 2.5,              // 手より手前の生地がその場に残る強さ
+  tongue: 2.2,                // 手の前この距離までの生地も一緒に押し出す
+  gather: 0.25,
+  stick: 0.97, stickLight: 0.04,
+  elbowOut: 0.55,
+  // ---- 右スティック：上げた手の位置 ----
+  aimSide: 1.5, aimFwd: 1.3, aimBack: 1.0,
+  // ---- 生地の状態（こねるほど変わる） ----
+  //            ふつう    ゆるゆる  かたい  ぷるぷる
+  stStiff:    [0.3,      0.12,     0.75,   0.55],  // バネの硬さ（形）
+  stRecov:    [0.1,      0.03,     0.5,    2.2],   // 形が戻る速さ
+  stFric:     [0.6,      0.4,      0.5,    0.3],   // まな板へのくっつき
+  stSX:       [1.1,      1.6,      0.85,   0.95],  // 生地の形：横の広がり
+  stSY:       [0.85,      0.4,      1.35,   1.15],  // 生地の形：高さ（だれる ↔ もりっと立つ）
+  stLump:     [0.3,      0.25,     1.0,    0.0],   // 表面のでこぼこ
+  stRough:    [0.75,     0.85,     0.95,   0.3],   // つや（小さいほどつやつや／べたべた）
+  stColor:    ['#e2cc9e', '#e6d2a6', '#d4bd8c', '#fdf1da'],
+  stKnead:    [0.6,      0.45,     1.2,    0.55],   // こねの進み方（どの状態もだいたい同じくらいの時間になるように）
+  stName:     ['ふつう', 'ゆるゆる', 'かたい', 'ぷるぷる'],
+  stHint:     ['ひじを上げて体を前へ。ついた手で生地を押し出そう', 'だれて手が外へ滑る：右スティックで内側へつき直そう',
+               'かたい：深く乗り出さないと押せない', '押し返してくる：はね返りに気をつけて'],
+  stageBlend: 1.2,             // 状態が変わるのにかかる時間（秒）
+  sticky: false,               // べたべた（手がくっつく）の状態を使うか（難しすぎたので今は使わない）
+  peelTime: 0.2,               // べたべた：手がはがれるまでの時間
+  stickJerk: 1.3,              // べたべた：はがれた反動の強さ
+  yankFrom: 0.7,               // べたべた：トリガーをこれより深く引くと反動が出る（浅めに引けば安全）
+  slackSlip: 0.6,              // ゆるゆる：ついた手が外へ滑る速さ
+  slackTip: 0.2,               // ゆるゆる：両手をついていても倒れようとする力が残る割合
+  stiffLean: [0.34, 0.5],      // かたい：この前傾の間で押せるようになる
+  bounce: 1.4,                 // ぷるぷる：押し出した距離1あたり、手を上げた時に後ろへはね返される強さ
+  // ---- こね ----
+  KNEAD_PER_MOVE: 11,         // 生地の上で押し出した距離あたりのこねた度（長く押すほど1あたりも増える）
+  ALT_BONUS: 1.5,             // 前と反対の手で押したとき
+  SAME_PENALTY: 0.35,         // 同じ手で続けて押したとき
+  foldTime: 0.28,             // 手を離すと、押し出した生地の奥側を手前へ折り返す
+  recenter: 0.35,             // 押していない間、生地が手元へ戻る速さ（ずれた生地は右スティックで狙い直す）
+  foldHome: 1.0,              // 折り返すとき、元の位置へ引き寄せる割合
+  foldFull: 1.2,              // 体重を乗せてこれだけ押し出すと、まるごと折り返す
+  foldLift: 1.2,
+  // 生地の状態：こね始めはべちゃっと広がり、台と手にくっつく → こね上がりはつるんと弾む
+  plast0: 2, plast1: 1,      // 伸ばされた形が残る速さ
+  stiff0: 0.2, stiff1: 0.55,  // バネの硬さ（こね始め → こね上がり）
+  recov0: 0.04, recov1: 1.6,  // 形が戻る速さ（こね始めは伸びたまま → こね上がりはすぐ丸く戻る）
+  fric0: 0.75, fric1: 0.3,    // まな板へのくっつき
+  handStick: 0.35,            // 手を離したとき生地が手にくっついてくる時間（こね始め。こねるほど短く）
+  stringMax: 1.1,             // これ以上伸びると手からはがれる
+  FALL_PENALTY: 6,            // 転ぶとこねた度が少し減る
+  FALL_SHOW: 2.0,             // 転んでから起き上がるまで
+  // ---- 生地 ----
+  spacing: 0.42,
+  doughRX: 1.35, doughRY: 1.0,
+  doughZ: 0.8,                // 生地を置く位置（少し手前）
+  gravity: 26, damping: 0.985, iterations: 8,
+  groundFric: 0.35,
+  BW: 7, BD: 4.4,
+  FALL_FRAC: 0.6,
+  FAIL_SHOW: 0.8,
+  deadzone: 0.12,
+  // ---- カメラ ----
+  camYaw: 0.45, camPitch: 0.95, camDist: 17, camSpeed: 1.6,
+  camPitchMin: 0.35, camPitchMax: 1.45,
+  camTarget: new THREE.Vector3(0, 0.5, 2.2),
+};
+
+// =====================================================================
+// three.js
+// =====================================================================
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color('#2a1d13');
+const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
+const camBase = new THREE.Vector3();
+let camZoom = 1;
+scene.add(new THREE.HemisphereLight('#fff4e0', '#5a3a20', 0.9));
+const sun = new THREE.DirectionalLight('#fff1dc', 1.6);
+sun.position.set(-3, 16, 5); sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -11, right: 11, top: 11, bottom: -9, near: 1, far: 40 });
+scene.add(sun);
+
+function woodTexture(w, h, base, seed0) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const b = c.getContext('2d');
+  b.fillStyle = base; b.fillRect(0, 0, w, h);
+  let seed = seed0; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 90; i++) {
+    const y0 = rnd() * h, amp = 2 + rnd() * 8, freq = 0.003 + rnd() * 0.008, ph = rnd() * 6;
+    b.strokeStyle = `rgba(${110 + rnd() * 40 | 0},${65 + rnd() * 30 | 0},25,${0.06 + rnd() * 0.14})`;
+    b.lineWidth = 1 + rnd() * 3; b.beginPath();
+    for (let x = 0; x <= w; x += 8) { const y = y0 + Math.sin(x * freq + ph) * amp; x ? b.lineTo(x, y) : b.moveTo(x, y); }
+    b.stroke();
+  }
+  for (let i = 0; i < 2500; i++) {
+    b.fillStyle = `rgba(255,252,240,${rnd() * 0.22})`;
+    b.beginPath(); b.arc(rnd() * w, rnd() * h, rnd() * 2.2, 0, 7); b.fill();
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; return t;
+}
+const counter = new THREE.Mesh(new THREE.BoxGeometry(60, 1, 40),
+  new THREE.MeshStandardMaterial({ map: woodTexture(1024, 1024, '#5b3f29', 3), roughness: 0.9 }));
+counter.position.y = -1.0; counter.receiveShadow = true; scene.add(counter); // 上面 y=-0.5
+const boardMat = new THREE.MeshStandardMaterial({ map: woodTexture(1600, 1000, '#d9ab72', 7), roughness: 0.75 });
+const sideMat = new THREE.MeshStandardMaterial({ color: '#b98650', roughness: 0.8 });
+const boardMesh = new THREE.Mesh(new THREE.BoxGeometry(CFG.BW * 2, 0.5, CFG.BD * 2), [sideMat, sideMat, boardMat, sideMat, sideMat, sideMat]);
+boardMesh.position.y = -0.25; boardMesh.receiveShadow = true; boardMesh.castShadow = true;
+scene.add(boardMesh);
+
+// ---- 生地の見た目 ----
+const MC_S = 5.6, MC_RES = 46;
+const doughMat = new THREE.MeshStandardMaterial({ color: '#e6d2a8', roughness: 0.85 });
+const mc = new MarchingCubes(MC_RES, doughMat, false, false, 90000);
+mc.scale.set(MC_S, MC_S, MC_S);
+mc.castShadow = true; mc.receiveShadow = true;
+mc.isolation = 80;
+scene.add(mc);
+const BALL_STRENGTH = 0.06, BALL_SUB = 12;
+const ghostMat = new THREE.MeshStandardMaterial({ color: '#e6d2a8', roughness: 0.85, transparent: true });
+const ghostGeo = new THREE.SphereGeometry(1, 10, 8);
+let ghosts = [];
+
+// ---- 焼き上がったパン ----
+let bread = null, bakeT = 0;
+const crustMat = new THREE.MeshStandardMaterial({ color: '#c47a33', roughness: 0.55 });
+const cutMat = new THREE.MeshStandardMaterial({ color: '#f1cf8e', roughness: 0.8 });
+function clearBread() { if (bread) { scene.remove(bread); bread = null; } bakeT = 0; mc.visible = true; }
+function makeBread() {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.SphereGeometry(1.45, 32, 24), crustMat);
+  body.scale.set(1, 0.72, 1); g.add(body);
+  for (const r of [Math.PI / 4, -Math.PI / 4]) {
+    const cut = new THREE.Mesh(new THREE.CapsuleGeometry(0.1, 1.3, 4, 8), cutMat);
+    cut.rotation.set(Math.PI / 2, 0, r); cut.position.y = 1.02; g.add(cut);
+  }
+  g.position.y = 1.0;
+  g.traverse(o => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
+  return g;
+}
+function updateBake(dt) {
+  if (!bakeT) return;
+  bakeT += dt;
+  if (!bread && bakeT > 0.7) {
+    const c = parts.length ? centroid() : new THREE.Vector3();
+    bread = makeBread();
+    bread.position.x = THREE.MathUtils.clamp(c.x, -CFG.BW + 2.5, CFG.BW - 2.5);
+    bread.position.z = THREE.MathUtils.clamp(c.z, -CFG.BD + 2.5, CFG.BD - 2.5);
+    bread.userData.t = 0; scene.add(bread); mc.visible = false;
+    puff(bread.position.clone().setY(0.3), 60, 1.4);
+    rumble(0.8, 0.8, 250);
+    $('doneSub').textContent = `タイム ${fmtTime(endTime - startTime)}　転んだ ${falls}回\nStart / R でもう一度`;
+    $('done').style.display = 'block';
+  }
+  if (bread) {
+    bread.userData.t += dt;
+    const k = Math.min(1, bread.userData.t / 0.35);
+    bread.scale.setScalar(0.3 + 0.7 * (1 - Math.pow(1 - k, 3)) + Math.sin(Math.min(1, bread.userData.t / 0.6) * Math.PI) * 0.08);
+  }
+}
+
+// ---- 手・腕・体 ----
+const skinMat = new THREE.MeshStandardMaterial({ color: '#f1c49c', roughness: 0.65 });
+const sleeveMats = [new THREE.MeshStandardMaterial({ color: '#4a8fd8', roughness: 0.8 }), new THREE.MeshStandardMaterial({ color: '#d8604f', roughness: 0.8 })];
+function makeHandModel(i) {
+  const side = i === 0 ? -1 : 1;
+  const root = new THREE.Group(), g = new THREE.Group();
+  root.scale.setScalar(1.35);
+  g.scale.x = side; root.add(g);
+  const palm = new THREE.Mesh(new THREE.SphereGeometry(0.5, 20, 14), skinMat);
+  palm.scale.set(1, 0.42, 1.05); g.add(palm);
+  const fingers = [];
+  for (let k = 0; k < 4; k++) {
+    const pv = new THREE.Group(); pv.position.set(-0.31 + k * 0.21, -0.02, -0.44);
+    const len = [0.34, 0.42, 0.4, 0.3][k];
+    const f = new THREE.Mesh(new THREE.CapsuleGeometry(0.095, len, 6, 10), skinMat);
+    f.rotation.x = Math.PI / 2; f.position.z = -len / 2 - 0.04;
+    pv.add(f); g.add(pv); fingers.push(pv);
+  }
+  const thumbPv = new THREE.Group(); thumbPv.position.set(-0.45, -0.04, -0.04);
+  const thumb = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.3, 6, 10), skinMat);
+  thumb.rotation.z = Math.PI / 2; thumb.position.x = -0.2; thumbPv.add(thumb); g.add(thumbPv);
+  g.traverse(o => { if (o.isMesh) o.castShadow = true; });
+  scene.add(root);
+  // 浮いている手の真下に、手をつく場所の目印（うすい輪）
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.45, 0.6, 28),
+    new THREE.MeshBasicMaterial({ color: '#fff3e0', transparent: true, opacity: 0.35, depthWrite: false }));
+  ring.rotation.x = -Math.PI / 2; scene.add(ring);
+  return { root, g, fingers, thumbPv, ring };
+}
+function cylBetween(mesh, a, b) {
+  const d = b.clone().sub(a); const len = d.length() || 1e-4;
+  mesh.position.copy(a).addScaledVector(d, 0.5);
+  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.divideScalar(len));
+  mesh.scale.set(1, len, 1);
+}
+function makeArmModel(i) {
+  const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.38, 1, 16), sleeveMats[i]);
+  const fore = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.26, 1, 16), skinMat);
+  const elbow = new THREE.Mesh(new THREE.SphereGeometry(0.4, 16, 12), sleeveMats[i]);
+  const shoulder = new THREE.Mesh(new THREE.SphereGeometry(0.55, 16, 12), sleeveMats[i]);
+  for (const o of [upper, fore, elbow, shoulder]) { o.castShadow = true; scene.add(o); }
+  return { upper, fore, elbow, shoulder };
+}
+const shirtMat = new THREE.MeshStandardMaterial({ color: '#f4f2ec', roughness: 0.9 });
+const stool = new THREE.Mesh(new THREE.CylinderGeometry(1.1, 0.9, 1.9, 20), new THREE.MeshStandardMaterial({ color: '#8a5a32', roughness: 0.8 }));
+stool.castShadow = true; scene.add(stool);
+const legs = [-1, 1].map(s => { const m = new THREE.Mesh(new THREE.CapsuleGeometry(0.4, 0.6, 6, 12), new THREE.MeshStandardMaterial({ color: '#3d3a46', roughness: 0.9 })); m.castShadow = true; scene.add(m); return m; });
+const torso = new THREE.Mesh(new THREE.CapsuleGeometry(1.15, 1.6, 8, 16), shirtMat);
+torso.castShadow = true; scene.add(torso);
+const head = new THREE.Mesh(new THREE.SphereGeometry(0.85, 20, 16), skinMat);
+head.castShadow = true; scene.add(head);
+const hat = new THREE.Mesh(new THREE.CylinderGeometry(0.75, 0.6, 0.9, 18), shirtMat);
+hat.castShadow = true; scene.add(hat);
+
+// =====================================================================
+// 生地（粒子 + 塑性バネ）
+// =====================================================================
+let parts = [], springs = [];
+let kneaded = 0, done = false, startTime = null, endTime = null;
+let failing = null, respawnT = 0, falls = 0, spawning = false, shake = 0;
+
+function spawnDough(drop) {
+  parts = []; springs = [];
+  const s = CFG.spacing, RX = CFG.doughRX, RY = CFG.doughRY;
+  const pr = s * 0.5, y0 = RY + pr + (drop ? 7 : 0);
+  for (let x = -RX; x <= RX + 1e-6; x += s) for (let y = -RY; y <= RY + 1e-6; y += s) for (let z = -RX; z <= RX + 1e-6; z += s) {
+    if ((x * x + z * z) / (RX * RX) + (y * y) / (RY * RY) > 1) continue;
+    const jx = (Math.random() - .5) * 0.04, jz = (Math.random() - .5) * 0.04;
+    const p = new THREE.Vector3(x + jx, y + y0, z + jz + CFG.doughZ);
+    parts.push({ p, q: p.clone(), j: Math.random() });
+  }
+  for (let i = 0; i < parts.length; i++) for (let j = i + 1; j < parts.length; j++) {
+    const d = parts[i].p.distanceTo(parts[j].p);
+    const v0 = parts[j].p.clone().sub(parts[i].p); // 元の向き（生地を伸ばす時に使う）
+    if (d < s * 1.5) springs.push({ a: parts[i], b: parts[j], rest0: d, rest: d, near: true, v0 });
+    else if (d < s * 1.9) springs.push({ a: parts[i], b: parts[j], rest0: d, rest: d, near: false, v0 });
+  }
+  done = false; clearBread();
+  failing = null; respawnT = 0; spawning = !!drop; folds = []; shapeZ = 1; shapeApplied = 1;
+  for (const h of hands) h.stuck = [];
+  $('done').style.display = 'none';
+}
+function resetGame() {
+  stage = 0; prevStage = 0; stageT = 9;
+  falls = 0; kneaded = 0; startTime = null; endTime = null; lastSide = 0;
+  for (const g of ghosts) scene.remove(g.m); ghosts = [];
+  resetBody(); spawnDough(false);
+}
+const centroid = () => { const c = new THREE.Vector3(); for (const p of parts) c.add(p.p); return c.divideScalar(Math.max(1, parts.length)); };
+const onBoard = p => Math.abs(p.x) < CFG.BW && Math.abs(p.z) < CFG.BD;
+// 生地の形：体重を乗せて押し出している間、奥へ長く伸びる（体積はそのまま）。手を離すと折り返されて丸く戻る
+let shapeZ = 1, shapeApplied = 1;
+// ---- 生地の状態 ----
+let stage = 0, prevStage = 0, stageT = 9, doughPulse = 0;
+const stageOf = k => k < 25 ? 0 : k < 50 ? 1 : k < 75 ? 2 : 3;
+// 今の状態の値（切りかわった直後は前の状態からなめらかに変わる）
+function stv(key) {
+  const a = CFG[key][prevStage], b = CFG[key][stage], u = Math.min(1, stageT / CFG.stageBlend);
+  return a + (b - a) * u * u * (3 - 2 * u);
+}
+function updateStage(dt) {
+  stageT += dt; doughPulse = Math.max(0, doughPulse - dt * 2.5);
+  const s = stageOf(kneaded);
+  if (s !== stage && !failing) {
+    prevStage = stage; stage = s; stageT = 0;
+    // 状態が変わった！ 粉が舞って、ぶるっと震える
+    if (parts.length) { puff(centroid().setY(0.8), 40, 1.1); }
+    rumble(0.7, 0.7, 260); doughPulse = 1;
+  }
+}
+function updateShape(dt) {
+  const k = kneaded / 100;
+  let target = 1;
+  for (const h of hands) if (h.planted) target = Math.max(target, 1 + CFG.stretchPer * (1 - 0.5 * k) * h.strokeDough);
+  target = Math.min(CFG.stretchMax, target);
+  // 伸びるのは手と一緒、戻るのは折り返しと一緒（こね上がりに近いほど早く戻る）
+  const rate = target > shapeZ ? 12 : 4 + 6 * k;
+  shapeZ += (target - shapeZ) * Math.min(1, dt * rate);
+  // 状態ごとの形（だれて広がる／もりっと立つ）
+  const gx = stv('stSX'), gy = stv('stSY');
+  const key = shapeZ * 7 + gx * 3 + gy;
+  if (Math.abs(key - shapeApplied) < 0.02) return;
+  shapeApplied = key;
+  const sxy = 1 / Math.sqrt(shapeZ);
+  for (const sp of springs) {
+    const r0 = Math.hypot(sp.v0.x * sxy * gx, sp.v0.y * sxy * gy, sp.v0.z * shapeZ * gx);
+    sp.rest *= r0 / sp.rest0;
+    sp.rest0 = r0;
+  }
+}
+
+// =====================================================================
+// 入力
+// =====================================================================
+const keys = {};
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'KeyR') resetGame();
+  if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+function stickRead(x, y) {
+  const m = Math.hypot(x, y);
+  if (m < CFG.deadzone) return [0, 0];
+  const n = Math.min(1, (m - CFG.deadzone) / (1 - CFG.deadzone));
+  return [x / m * n, y / m * n];
+}
+let curPad = null, padName = '', startPrev = false, aPrev = false;
+function readInput() {
+  const inp = { lx: 0, lz: 0, rx: 0, rz: 0, t: [0, 0] };
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let pad = null; for (const p of pads) if (p && p.connected) { pad = p; break; }
+  curPad = pad; padName = pad ? pad.id : '';
+  if (pad) {
+    const b = i => pad.buttons[i] ? pad.buttons[i].value : 0;
+    [inp.lx, inp.lz] = stickRead(pad.axes[0] || 0, pad.axes[1] || 0);
+    [inp.rx, inp.rz] = stickRead(pad.axes[2] || 0, pad.axes[3] || 0);
+    inp.t[0] = b(6); inp.t[1] = b(7);
+    const st = b(9) > 0.5, a = b(0) > 0.5;
+    if ((st && !startPrev) || (a && !aPrev && done)) resetGame();
+    startPrev = st; aPrev = a;
+  }
+  const k = c => keys[c] ? 1 : 0;
+  inp.lx += k('KeyD') - k('KeyA'); inp.lz += k('KeyS') - k('KeyW');
+  inp.rx += k('ArrowRight') - k('ArrowLeft'); inp.rz += k('ArrowDown') - k('ArrowUp');
+  if (keys.KeyF) inp.t[0] = 1;
+  if (keys.KeyJ) inp.t[1] = 1;
+  return inp;
+}
+const camIn = { x: 0, z: 0 };
+let camYaw = CFG.camYaw, camPitch = CFG.camPitch;
+function rumble(strong, weak, ms) {
+  const act = curPad && curPad.vibrationActuator;
+  if (act && act.playEffect) act.playEffect('dual-rumble', { duration: ms, strongMagnitude: Math.min(1, strong), weakMagnitude: Math.min(1, weak) }).catch(() => {});
+}
+function surfaceY(x, z, r) {
+  let top = -Infinity;
+  for (const p of parts) if ((p.p.x - x) ** 2 + (p.p.z - z) ** 2 < r * r) top = Math.max(top, p.p.y);
+  return top;
+}
+
+// =====================================================================
+// 体と手
+// =====================================================================
+const body = { fz: 0, vz: 0, fx: 0, vx: 0, nz: 0, nx: 0, tw: 0, down: false, downT: 0, top: new THREE.Vector3(), right: new THREE.Vector3(),
+  hip: CFG.hip.clone(), hv: new THREE.Vector3(), fallDir: new THREE.Vector3(), landed: false, prevSz: CFG.hip.z, aimX: 0, aimZ: 0 };
+const hands = [0, 1].map(i => {
+  const side = i === 0 ? -1 : 1;
+  const pos = new THREE.Vector3(side * 1.2, 1.4, CFG.hip.z - CFG.reach0);
+  return {
+    i, side, pos, hv: new THREE.Vector3(), vy: 0, d: new THREE.Vector3(),
+    S: new THREE.Vector3(), elbow: new THREE.Vector3(), wrist: new THREE.Vector3(),
+    E: new THREE.Vector3(), hq: new THREE.Vector3(), freeInit: false,
+    press: 0, planted: true, landed: true, contact: false, stroke: 0, strokeDough: 0, plantZ: 0, w: 0,
+    model: makeHandModel(i), arm: makeArmModel(i),
+  };
+});
+let lastSide = 0, folds = [], clock = 0;
+function resetBody() {
+  Object.assign(body, { fz: CFG.rest, vz: 0, fx: 0, vx: 0, nz: 0, nx: 0, tw: 0, down: false, downT: 0, landed: false });
+  body.hip.copy(CFG.hip); body.hv.set(0, 0, 0);
+  const topZ = CFG.hip.z - Math.sin(CFG.rest) * CFG.torsoLen;
+  body.prevSz = topZ;
+  // はじめは両手を生地の上についている
+  for (const h of hands) { h.planted = true; h.landed = true; h.press = 0; h.hv.set(0, 0, 0); h.vy = 0; h.pos.set(h.side * (CFG.shoulderHalf - CFG.inward), 1.6, topZ - CFG.reach0); h.strokeDough = 0; h.strokeId = (h.strokeId || 0) + 2 + h.i; h.plantZ = h.pos.z; h.freeInit = false; }
+}
+
+// 手を上げた：押し出した分だけこねが進み、押し出した生地が折り返る
+function endStroke(h) {
+  h.planted = false;
+  if (h.strokeDough > 0.3 && !failing && !body.down) {
+    if (lastSide !== h.side && lastSide !== 0) { rumble(0.25, 0.35, 70); puff(h.pos.clone().setY(0.3), 6, 0.5); }
+    lastSide = h.side;
+    // 押し出した生地の奥側を、手前へ折り返す
+    startFold(h.strokeDough / CFG.foldFull);
+    // ぷるぷる：押し出した分だけ生地が押し返す → 体が後ろへはね返される
+    if (stage === 3) { body.vz -= CFG.bounce * Math.min(1.5, h.strokeDough); doughPulse = 1; rumble(0.5, 0.5, 120); }
+  }
+  // こね始めの生地は手にくっついて、持ち上げた手についてくる
+  const k = kneaded / 100;
+  h.stuck = [];
+  if (!body.down && h.contact && stage === 1) {
+    for (const pt of parts) if (Math.hypot(pt.p.x - h.pos.x, pt.p.z - h.pos.z) < CFG.contactR * 0.7 && pt.p.y > h.pos.y - 0.4)
+      h.stuck.push({ pt, ox: pt.p.x - h.pos.x, oz: pt.p.z - h.pos.z });
+    h.stuckT = CFG.handStick;
+  }
+  h.strokeDough = 0; h.stroke = 0;
+}
+
+function updateBody(dt) {
+  const inp = readInput();
+  clock += dt;
+  const B = body;
+  if (startTime === null && (Math.hypot(inp.lx, inp.lz) > 0.2 || inp.t[0] > 0.2 || inp.t[1] > 0.2)) startTime = performance.now();
+
+  // ---- 肩の位置 ----
+  const P0 = B.hip;
+  B.top.set(P0.x + Math.sin(B.fx) * CFG.torsoLen, P0.y + Math.cos(B.fx) * Math.cos(B.fz) * CFG.torsoLen, P0.z - Math.sin(B.fz) * CFG.torsoLen);
+  // ひねり：前に出ている手の側の肩が前へ
+  const ext = h => Math.max(0, B.top.z - h.pos.z);
+  const tw = THREE.MathUtils.clamp((ext(hands[1]) - ext(hands[0])) * 0.1, -0.45, 0.45);
+  B.tw += (tw - B.tw) * Math.min(1, dt * 10);
+  B.right.set(Math.cos(B.tw), 0, -Math.sin(B.tw));
+  // ---- 右スティック：上げた手をどこへ持っていくか（体から見た向き。上＝奥） ----
+  {
+    const rx = THREE.MathUtils.clamp(inp.rx, -1, 1), rz = THREE.MathUtils.clamp(inp.rz, -1, 1);
+    const tx = rx * CFG.aimSide, tz = rz * (rz < 0 ? CFG.aimFwd : CFG.aimBack);
+    B.aimX += (tx - B.aimX) * Math.min(1, dt * 8); B.aimZ += (tz - B.aimZ) * Math.min(1, dt * 8);
+  }
+  const st = stage;
+  const fwdIn = -THREE.MathUtils.clamp(inp.lz, -1, 1); // 左スティック上＝前
+  const dSz = B.top.z - B.prevSz; B.prevSz = B.top.z;  // 肩がこのフレームで動いた量（マイナス＝前へ）
+
+  // ---- 手 ----
+  for (const h of hands) {
+    h.S.copy(B.top).addScaledVector(B.right, h.side * CFG.shoulderHalf);
+    const tr = B.down || failing || done ? 0 : THREE.MathUtils.clamp(inp.t[h.i], 0, 1);
+    h.press += (tr - h.press) * Math.min(1, dt * 14);
+    const up = tr > CFG.liftAt && !B.down;
+    if (up && h.planted) {
+      if (CFG.sticky && st === 0 && h.landed && h.contact) {
+        // べたべた：すぐにははがれない。はがれた瞬間、反動で体がのけぞる（強く押しているほど大きい）
+        h.peel = (h.peel || 0) + dt;
+        if (h.peel > CFG.peelTime) {
+          h.peel = 0; endStroke(h); h.hv.set(0, 0, 0);
+          // 反動はトリガーを強く引いた時だけ（ゆっくり・浅めに引けばほとんどない）
+          const yank = THREE.MathUtils.smoothstep(tr, CFG.yankFrom, 1);
+          B.vz -= CFG.stickJerk * yank; B.vx += h.side * CFG.stickJerk * 0.3 * yank;
+          rumble(0.25 + 0.5 * yank, 0.3, 100); puff(h.pos.clone(), 8, 0.5);
+        }
+      } else { h.peel = 0; endStroke(h); h.hv.set(0, 0, 0); rumble(0.15, 0.1, 40); }
+    } else if (!up) h.peel = 0;
+    if (up && !h.planted && !h.freeInit) {
+      // 手が浮いた：ここから前腕と手はひじからぶら下がるだけ
+      h.freeInit = true; h.wasUp = true; h.hq.copy(h.pos); h.E.copy(h.pos).add(new THREE.Vector3(0, CFG.foreLen, 0.3));
+    }
+    const s = surfaceY(h.pos.x, h.pos.z, CFG.contactR);
+    if (h.planted) {
+      h.contact = isFinite(s) && !spawning;
+      {
+        // 体重がかかった手：体が前へ出ると生地を奥へ押し出し、後ろへ下がると少し手前へ引きずる
+        // かたい：深く乗り出さないと押せない
+        const hard = st === 2 ? THREE.MathUtils.smoothstep(B.fz, CFG.stiffLean[0], CFG.stiffLean[1]) : 1;
+        const dz = dSz < 0 ? dSz * CFG.pushFwd * (0.08 + 0.92 * hard) : dSz * CFG.pushBack;
+        // ゆるゆる：ついた手が外へずるずる滑る
+        const slip = st === 1 && h.contact ? h.side * CFG.slackSlip * dt : 0;
+        h.d.set(slip, 0, dz);
+        h.pos.add(h.d);
+        h.w = h.contact ? 0.85 : 0;
+        // べたべた：はがれかけの手は、生地を引っぱりながら少しずつ持ち上がる
+        const peelUp = (h.peel || 0) / CFG.peelTime * 0.6;
+        const ty = (h.contact ? Math.max(0.35, s + 0.42 - h.w * CFG.pressDepth) : 0.35) + peelUp;
+        h.vy += (900 * (ty - h.pos.y) - 55 * h.vy) * dt; h.pos.y += h.vy * dt;
+        if (h.pos.y < 0.3) { h.pos.y = 0.3; h.vy = Math.max(0, h.vy); }
+        if (h.contact && dz < 0) {
+          h.strokeDough += -dz;
+          addKneaded(-dz * CFG.KNEAD_PER_MOVE * CFG.stKnead[stage] * (lastSide !== 0 && lastSide !== h.side ? CFG.ALT_BONUS : 1));
+          h.rumT = (h.rumT || 0) - dt;
+          if (h.rumT <= 0) { h.rumT = 0.1; rumble(0.35, 0.15, 110); }
+        }
+      }
+    } else {
+      // 浮いた手：動かすのはひじだけ。前腕と手はひじからブラーンとぶら下がって、勢いで揺れる
+      //   トリガー＝ひじを上げる（離すとひじが下がって、手が下にある物の上に落ちる）
+      //   左スティック＝ひじを前後へ（体も傾く）／右スティック＝ひじを前後左右へ（どこをこねるか）
+      const ex = h.S.x - h.side * CFG.inward + B.aimX, ez = h.S.z - CFG.reach0 - fwdIn * (fwdIn > 0 ? CFG.swing : CFG.swingBack) + B.aimZ;
+      const under = surfaceY(ex, ez, CFG.contactR);
+      const ground = (isFinite(under) ? under + 0.42 : 0.35);
+      const ey = ground + CFG.foreLen + (up ? CFG.lift * Math.min(1, h.press * 1.5) : -0.5);
+      const ef = Math.min(1, dt * CFG.elbowFollow);
+      h.E.x += (ex - h.E.x) * ef; h.E.z += (ez - h.E.z) * ef; h.E.y += (ey - h.E.y) * Math.min(1, dt * (up ? CFG.elbowFollow : CFG.elbowDrop));
+      // トリガーを離した瞬間、ひじをストンと下ろす（手に下向きの勢い）
+      if (!up && h.wasUp) h.hq.y += CFG.dropSpeed / 60;
+      h.wasUp = up;
+      // 手：重りとして揺れる（ベルレ）
+      const v = h.pos.clone().sub(h.hq).multiplyScalar(CFG.handDamp);
+      h.hq.copy(h.pos);
+      h.pos.add(v); h.pos.y -= CFG.handG * dt * dt;
+      // 前腕の長さは一定
+      const d = h.pos.clone().sub(h.E), L = d.length() || 1e-4;
+      h.pos.copy(h.E).addScaledVector(d, CFG.foreLen / L);
+      // 下にある物（生地・まな板）の上で止まる
+      const s2 = surfaceY(h.pos.x, h.pos.z, CFG.contactR);
+      const floor = isFinite(s2) ? s2 + 0.42 : 0.35;
+      h.d.copy(h.pos).sub(h.hq);
+      h.contact = false; h.w = 0; h.landed = false;
+      if (h.pos.y <= floor) {
+        h.pos.y = floor; if (h.hq.y < floor) h.hq.y = floor;
+        if (!up && !B.down) {
+          // ひじを下ろしていて手がついた → そこに手をつく
+          const hit = Math.max(0, (h.hq.y - h.pos.y) / dt);
+          h.planted = true; h.landed = true; h.freeInit = false; h.vy = 0;
+          h.strokeId = (h.strokeId || 0) + 2 + h.i; h.plantZ = h.pos.z; h.strokeDough = 0;
+          rumble(0.25 + Math.min(0.5, hit * 0.05), 0.2, 60); if (isFinite(s2)) puff(h.pos.clone().setY(floor), 5, 0.4);
+        }
+      }
+    }
+    if (!h.planted) {
+      h.elbow.copy(h.E);
+      h.wrist.copy(h.pos); h.wrist.y += 0.25;
+      continue;
+    }
+    h.wrist.copy(h.pos); h.wrist.y += 0.25;
+    const fdir = new THREE.Vector3(h.pos.x - h.S.x, 0, h.pos.z - h.S.z).normalize();
+    h.wrist.addScaledVector(fdir, 0.45);
+    h.elbow.copy(h.S).lerp(h.wrist, 0.5);
+    h.elbow.x += h.side * CFG.elbowOut; h.elbow.y += 0.7 + (h.planted ? 0 : 0.9 * h.press); // ひじを上げる
+  }
+
+  // ---- 体：倒れようとする振り子。ついた手が支える ----
+  B.nz += ((Math.random() - 0.5) * 6 - B.nz * 0.8) * dt * 3;
+  B.nx += ((Math.random() - 0.5) * 6 - B.nx * 0.8) * dt * 3;
+  // ときどきガタッ（向きも強さもランダム）
+  B.kickT = (B.kickT ?? 2) - dt;
+  if (B.kickT <= 0) {
+    const [a, b] = CFG.kickEvery; B.kickT = a + Math.random() * (b - a);
+    if (!B.down && startTime !== null && !spawning && !done) {
+      const ang = Math.random() * Math.PI * 2, m = CFG.kick * (0.5 + Math.random() * 0.5);
+      B.vx += Math.cos(ang) * m; B.vz += Math.sin(ang) * m * 0.7;
+      shake = Math.max(shake, 0.12); rumble(0.5, 0.2, 90);
+    }
+  }
+  if (B.down) {
+    B.downT += dt;
+    // 倒れていく
+    const ax = Math.abs(B.fx) > Math.abs(B.fz) * 1.2;
+    if (ax) B.vx += Math.sign(B.fx) * 7 * dt; else B.vz += Math.sign(B.fz || 1) * 7 * dt;
+    B.fz += B.vz * dt; B.fx += B.vx * dt;
+    B.fz = THREE.MathUtils.clamp(B.fz, -1.35, 1.2); B.fx = THREE.MathUtils.clamp(B.fx, -1.4, 1.4);
+    if (Math.abs(B.fz) >= 1.2 || Math.abs(B.fx) >= 1.4) { B.vz = 0; B.vx = 0; }
+    // 踏み台から落ちる：腰ごと倒れる向きへ飛び出して、床まで落ちる
+    const floorY = 0.05;
+    if (!B.landed) {
+      B.hv.y -= 22 * dt;
+      B.hip.addScaledVector(B.hv, dt);
+      if (B.hip.y <= floorY) {
+        B.hip.y = floorY; B.landed = true;
+        shake = 0.7; rumble(1, 1, 250);
+        puff(B.hip.clone().setY(0.1), 30, 1.1);
+        puff(B.top.clone().setY(0.3), 20, 0.9);
+      }
+    } else {
+      B.hv.multiplyScalar(Math.exp(-dt * 8));
+      B.hip.x += B.hv.x * dt; B.hip.z += B.hv.z * dt;
+    }
+    // 作業台（まな板）には入り込まない
+    if (B.hip.z < CFG.BD + 0.9) B.hip.z = CFG.BD + 0.9;
+    if (B.downT > CFG.FALL_SHOW) { resetBody(); }
+    return;
+  }
+  if (startTime === null || spawning || done) {
+    B.fz += (CFG.rest - B.fz) * 0.1; B.fx *= 0.9; B.vz *= 0.5; B.vx *= 0.5;
+    return;
+  }
+  // ついている手（着地していて、まな板の上）
+  const support = hands.filter(h => h.planted && h.landed && onBoard(h.pos));
+  const raised = hands.filter(h => !h.planted);
+  let az, ax;
+  if (support.length === 2) {
+    // 両手をついている：その姿勢のまま支えられる（揺れはすぐ止まる。横はまっすぐへ戻る）
+    // ゆるゆるの生地の上では、両手をついていても足元（手元）がぬかるんで揺れる
+    az = (st === 1 ? CFG.tipG * CFG.slackTip * Math.sin(B.fz - CFG.rest) : 0) - CFG.holdD * B.vz * (st === 1 ? 0.35 : 1) + B.nz * CFG.wobble * (st === 1 ? 1 : 0.3);
+    ax = -CFG.latBack * B.fx - CFG.holdD * B.vx + B.nx * CFG.wobble * 0.3;
+  } else {
+    // 片手（または手が下りている途中）：支えが減って倒れはじめる。ひじを上げている間は左スティックで体を前後へ
+    const g = support.length === 1 ? CFG.oneHand : 1;
+    const lz = CFG.rest + fwdIn * CFG.leanStick;
+    const drive = raised.length ? CFG.muscle : 0;
+    az = CFG.tipG * g * Math.sin(B.fz) + drive * (lz - B.fz) - CFG.bodyD * B.vz + B.nz * CFG.wobble;
+    // 上げた手の側へ傾こうとする（片足立ちと同じ）
+    const lat = raised.reduce((t, h) => t + h.side, 0) * CFG.latFall;
+    ax = CFG.tipG * g * Math.sin(B.fx) + lat - CFG.bodyD * B.vx - (support.length ? CFG.latBack * 0.4 * B.fx : 0) + B.nx * CFG.wobble * 0.8;
+  }
+  B.vz += az * dt; B.vx += ax * dt;
+  B.fz += B.vz * dt; B.fx += B.vx * dt;
+  if (!failing && (B.fz > CFG.fallFwd || B.fz < -CFG.fallBack || Math.abs(B.fx) > CFG.fallSide)) fall();
+}
+
+function fall() {
+  const B = body;
+  B.down = true; B.downT = 0; falls++;
+  for (const h of hands) { h.planted = false; h.strokeDough = 0; }
+  kneaded = Math.max(0, kneaded - CFG.FALL_PENALTY);
+  shake = 0.4;
+  rumble(0.8, 0.6, 200);
+  // 倒れた向きへ、踏み台から飛び出す
+  B.fallDir.set(B.fx, 0, -B.fz).normalize();
+  B.hv.set(B.fallDir.x * 3.2, 2.5, B.fallDir.z * 3.2);
+  B.landed = false;
+  puff(CFG.hip.clone().setY(0.6), 12, 0.6);
+}
+
+// 押している手の下の生地がついてくる。手のひらで上から押さえる
+function handPush(iter) {
+  const it = CFG.iterations;
+  for (const h of hands) {
+    if (!h.planted) {
+      // 手にくっついた生地：持ち上げた手に引っぱられて糸のように伸び、伸びすぎるとはがれる
+      if (h.stuck && h.stuck.length) {
+        h.stuckT -= 1 / 60 / it;
+        const ty = h.pos.y - 0.3;
+        for (const s of h.stuck) {
+          const tx = h.pos.x + s.ox, tz = h.pos.z + s.oz, p = s.pt.p;
+          const dist = Math.hypot(tx - p.x, ty - p.y, tz - p.z);
+          if (dist > CFG.stringMax) { s.gone = true; continue; }
+          const f = 0.05 / it; // 上へは引っぱられるが、横へはあまりついてこない
+          p.x += (tx - p.x) * f * 0.3; p.y += (ty - p.y) * f; p.z += (tz - p.z) * f * 0.3;
+        }
+        h.stuck = h.stuck.filter(s => !s.gone);
+        if (h.stuckT <= 0) h.stuck = [];
+      }
+      continue;
+    }
+    const w = h.w || 0;
+    const R = CFG.contactR * (1 + 0.4 * w);
+    const ahead = CFG.tongue * w; // 体重が乗っているほど、手の前の生地まで一緒に押し出される（べろーん）
+    for (const pt of parts) {
+      const dx = pt.p.x - h.pos.x, dz = pt.p.z - h.pos.z;
+      // 手より手前の生地は、まな板にくっついてその場に残る → 手の前だけ伸びる
+      if (dz > R * 0.5 && dx < R * 1.5 && dx > -R * 1.5 && w > 0.2) {
+        if (pt.anc !== h.strokeId) { pt.anc = h.strokeId; pt.az = pt.p.z; }
+        const hz = (pt.az - pt.p.z) * CFG.holdBack * w / it;
+        pt.p.z += hz; pt.q.z += hz;
+        continue;
+      }
+      const RL = dz < 0 ? R * 1.5 : R; // 手の前は横にも広く押す
+      if (dx > RL || dx < -RL || dz > R || dz < -R - ahead) continue;
+      if (dz >= 0 && pt.p.y > h.pos.y + 0.3) continue; // 手の前の生地は高さに関係なく押される
+      // 手の下：手のひらの真ん中ほど強く。手の前：離れるほど弱く
+      const under = Math.hypot(dx, Math.max(0, dz));
+      let wgt;
+      if (dz >= 0) { if (under >= R) continue; wgt = 1 - under / R; }
+      else wgt = Math.max(0, 1 - (dx / RL) ** 2) * Math.min(1, (R + ahead + dz) / 0.6);
+      if (wgt <= 0) continue;
+      // 押し出しは1フレームに1回、手と同じだけ動かす（バネに負けずに伸びる）
+      if (iter === 0) {
+        const f = (CFG.stickLight + (CFG.stick - CFG.stickLight) * Math.min(1, w * 1.8)) * (0.5 + 0.5 * wgt);
+        pt.p.z += h.d.z * f; pt.q.z += h.d.z * f;
+      }
+      // 手のひらで寄せる（左右交互に押すと、生地が両手の間にまとまる）
+      const gx = stage === 1 ? 0 : (h.pos.x - pt.p.x) * CFG.gather * w * wgt / it; // ゆるゆるの時は手だけ滑っていく
+      pt.p.x += gx; pt.q.x += gx;
+      if (dz > -R * 0.6 && pt.p.y > h.pos.y - 0.15) pt.p.y = h.pos.y - 0.15;
+    }
+  }
+}
+// 折り返し：押し出した生地のうち、手をついた所より奥の部分を手前へ持ち上げて戻す
+function updateFolds(dt) {
+  for (const f of folds) {
+    const a = f.t / CFG.foldTime;
+    f.t += dt;
+    const b = Math.min(1, f.t / CFG.foldTime);
+    const e = x => x * x * (3 - 2 * x);
+    for (const m of f.list) {
+      const pt = m.pt;
+      const dz = m.dz * (e(b) - e(a));
+      const dy = m.lift * (Math.sin(b * Math.PI) - Math.sin(a * Math.PI));
+      pt.p.z += dz; pt.q.z += dz;
+      pt.p.y += dy; pt.q.y += dy;
+    }
+  }
+  folds = folds.filter(f => f.t < CFG.foldTime);
+}
+// 折り返し：奥へ伸びた半分を、真ん中を軸に手前へパタンと重ねる。少し手前（元の位置）にも寄せる
+function startFold(strength) {
+  if (!parts.length) return;
+  const c = centroid();
+  const s = Math.min(1, strength);
+  // 奥半分を真ん中を軸に手前へ重ねる
+  let shift = 0;
+  const flip = parts.map(pt => { const dz = pt.p.z < c.z - 0.1 ? (c.z - pt.p.z) * 2 * s : 0; shift += dz; return dz; });
+  shift /= parts.length;
+  // 折り返したあと、生地の真ん中が元の位置に来るように全体を寄せる（生地が逃げていかない）
+  const home = (CFG.doughZ - c.z - shift) * CFG.foldHome;
+  const list = parts.map((pt, i) => ({ pt, dz: flip[i] + home, lift: CFG.foldLift * Math.min(1.5, flip[i] / 1.5) }));
+  folds.push({ list, t: 0 });
+}
+
+// =====================================================================
+// 物理
+// =====================================================================
+function stepDough(dt) {
+  const k = kneaded / 100;
+  const stiff = stv('stStiff');
+  const yieldS = 0.08 + 0.1 * k;
+  const plast = CFG.plast0 + (CFG.plast1 - CFG.plast0) * k; // こね始めはすぐ形が変わる（伸ばした形のまま残る）
+  const recov = stv('stRecov');
+  const fric = stv('stFric');
+  const pr = CFG.spacing * 0.5, minD = CFG.spacing * 0.85 / Math.max(1, Math.sqrt(shapeZ)); // 伸びている間は横に詰まれる
+  const g = CFG.gravity * dt * dt;
+  // 押していない間は、生地がゆっくり手元（両手の間）へ戻ってくる（手の届かない所へ行ったままにならない）
+  if (!spawning && !failing && !hands.some(h => h.planted && h.contact && h.w > 0.2)) {
+    const c = centroid(), r = Math.min(1, CFG.recenter * dt);
+    const mx = (0 - c.x) * r, mz = (CFG.doughZ - c.z) * r;
+    for (const pt of parts) { pt.p.x += mx; pt.q.x += mx; pt.p.z += mz; pt.q.z += mz; }
+  }
+  for (const pt of parts) {
+    const p = pt.p, q = pt.q;
+    const vx = (p.x - q.x) * CFG.damping, vy = (p.y - q.y) * CFG.damping, vz = (p.z - q.z) * CFG.damping;
+    q.copy(p);
+    p.x += vx; p.y += vy - g; p.z += vz;
+  }
+  let landed = false;
+  for (let it = 0; it < CFG.iterations; it++) {
+    for (const sp of springs) {
+      const a = sp.a.p, b = sp.b.p;
+      const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+      const d = Math.hypot(dx, dy, dz) || 1e-5;
+      const f = (d - sp.rest) / d * (sp.near ? stiff : stiff * 0.5) * 0.5;
+      a.x += dx * f; a.y += dy * f; a.z += dz * f;
+      b.x -= dx * f; b.y -= dy * f; b.z -= dz * f;
+    }
+    if (it === 0 || it === CFG.iterations - 1) {
+      for (let i = 0; i < parts.length; i++) {
+        const a = parts[i].p;
+        for (let j = i + 1; j < parts.length; j++) {
+          const b = parts[j].p;
+          const dx = b.x - a.x; if (dx > minD || dx < -minD) continue;
+          const dy = b.y - a.y; if (dy > minD || dy < -minD) continue;
+          const dz = b.z - a.z; if (dz > minD || dz < -minD) continue;
+          const d = Math.hypot(dx, dy, dz) || 1e-5;
+          if (d >= minD) continue;
+          const f = (d - minD) / d * 0.25;
+          a.x += dx * f; a.y += dy * f; a.z += dz * f;
+          b.x -= dx * f; b.y -= dy * f; b.z -= dz * f;
+        }
+      }
+    }
+    handPush(it);
+    for (const pt of parts) {
+      const floor = onBoard(pt.p) ? pr : -0.5 + pr;
+      if (pt.p.y < floor) { pt.p.y = floor; landed = true; }
+    }
+  }
+  for (const pt of parts) {
+    const floor = onBoard(pt.p) ? pr : -0.5 + pr;
+    if (pt.p.y <= floor + 0.01) {
+      pt.q.x += (pt.p.x - pt.q.x) * fric;
+      pt.q.z += (pt.p.z - pt.q.z) * fric;
+      if (pt.q.y < pt.p.y) pt.q.y = pt.p.y;
+    }
+  }
+  if (spawning && landed) {
+    let minY = Infinity; for (const pt of parts) minY = Math.min(minY, pt.p.y);
+    if (minY < pr + 0.05) { spawning = false; puff(centroid(), 30, 1); rumble(0.4, 0.3, 110); }
+  }
+  // 塑性
+  const pl = Math.min(1, plast * dt);
+  for (const sp of springs) {
+    const len = sp.a.p.distanceTo(sp.b.p);
+    const strain = (len - sp.rest) / sp.rest;
+    if (Math.abs(strain) > yieldS) {
+      const target = len - Math.sign(strain) * yieldS * sp.rest;
+      sp.rest += (target - sp.rest) * pl;
+    }
+    sp.rest += (sp.rest0 - sp.rest) * Math.min(1, recov * dt);
+    sp.rest = THREE.MathUtils.clamp(sp.rest, sp.rest0 * 0.5, sp.rest0 * 3);
+  }
+  // まな板から落ちる
+  if (!failing && !spawning) {
+    let out = 0;
+    for (const pt of parts) if (!onBoard(pt.p)) out++;
+    if (out / parts.length >= CFG.FALL_FRAC) doughLost();
+  }
+}
+
+function addKneaded(v) {
+  if (done || failing) return;
+  kneaded = Math.min(100, kneaded + v);
+  if (kneaded >= 100) {
+    done = true; endTime = performance.now();
+    for (const h of hands) h.planted = false;
+    rumble(1, 1, 400);
+    bakeT = 0.01;
+  }
+}
+function doughLost() {
+  if (failing || done) return;
+  failing = { t: 0 };
+  falls++;
+  rumble(1, 0.9, 300);
+}
+function updateFail(dt) {
+  if (!failing) return;
+  failing.t += dt;
+  if (failing.t >= CFG.FAIL_SHOW && parts.length) {
+    const col = doughMat.color.clone();
+    for (let i = 0; i < parts.length; i += 2) {
+      const m = new THREE.Mesh(ghostGeo, ghostMat.clone());
+      m.material.color.copy(col);
+      m.position.copy(parts[i].p); m.scale.setScalar(CFG.spacing * 0.9);
+      scene.add(m); ghosts.push({ m, t: 0 });
+    }
+    parts = []; springs = [];
+    respawnT = 0.3;
+  }
+}
+
+// =====================================================================
+// 演出
+// =====================================================================
+const PN = 400;
+const pPos = new Float32Array(PN * 3).fill(-100), pVel = new Float32Array(PN * 3), pLife = new Float32Array(PN);
+const pGeo = new THREE.BufferGeometry(); pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+scene.add(new THREE.Points(pGeo, new THREE.PointsMaterial({ color: '#fffaf0', size: 0.1, transparent: true, opacity: 0.85, depthWrite: false })));
+let pNext = 0;
+function puff(at, n, power) {
+  for (let i = 0; i < n; i++) {
+    const j = pNext; pNext = (pNext + 1) % PN;
+    const a = Math.random() * Math.PI * 2, sp = (1 + Math.random() * 3) * power;
+    pPos[j * 3] = at.x + Math.cos(a) * 0.8; pPos[j * 3 + 1] = Math.max(0.05, at.y); pPos[j * 3 + 2] = at.z + Math.sin(a) * 0.8;
+    pVel[j * 3] = Math.cos(a) * sp; pVel[j * 3 + 1] = 1 + Math.random() * 2.5 * power; pVel[j * 3 + 2] = Math.sin(a) * sp;
+    pLife[j] = 0.5 + Math.random() * 0.7;
+  }
+}
+function fmtTime(ms) { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); }
+
+const CREAM0 = new THREE.Color('#d6bd8e'), CREAM1 = new THREE.Color('#fbeed4');
+function syncDough() {
+  mc.reset();
+  if (!parts.length) { mc.update(); return; }
+  const c = centroid();
+  mc.position.set(c.x, MC_S - 1.2, c.z);
+  const inv = 1 / (2 * MC_S);
+  const lump = stv('stLump');
+  for (const pt of parts) {
+    const bx = (pt.p.x - mc.position.x) * inv + 0.5, by = (pt.p.y - mc.position.y) * inv + 0.5, bz = (pt.p.z - mc.position.z) * inv + 0.5;
+    if (bx < 0.02 || bx > 0.98 || by < 0.02 || by > 0.98 || bz < 0.02 || bz > 0.98) continue;
+    mc.addBall(bx, by, bz, BALL_STRENGTH * (1 + (pt.j - 0.5) * lump), BALL_SUB);
+  }
+  mc.update();
+  // こねるほど白くつやつやに
+  const k = kneaded / 100;
+  {
+    const u = Math.min(1, stageT / CFG.stageBlend);
+    doughMat.color.set(CFG.stColor[prevStage]).lerp(new THREE.Color(CFG.stColor[stage]), u);
+  }
+  doughMat.roughness = stv('stRough');
+  // ぷるっと震える（状態が変わった時・押し返した時）
+  const pulse = Math.sin(performance.now() / 45) * 0.06 * doughPulse;
+  mc.scale.set(MC_S * (1 - pulse * 0.5), MC_S * (1 + pulse), MC_S * (1 - pulse * 0.5));
+}
+const UP = new THREE.Vector3(0, 1, 0);
+function syncBody() {
+  const B = body;
+  // 踏み台も体と一緒に少し傾く
+  if (B.down) {
+    // 踏み台は反対側へ蹴り出されて倒れる
+    const od = B.fallDir, a = Math.min(Math.PI / 2, B.downT * 5), sl = Math.min(1, B.downT * 3) * 1.2;
+    stool.rotation.set(-od.z * a, 0, od.x * a);
+    const bx = CFG.hip.x - od.x * sl, bz = CFG.hip.z - od.z * sl;
+    // 底の中心を支点に傾ける（倒れきると横倒しで床に寝る）
+    stool.position.set(bx - od.x * Math.sin(a) * 0.95, -0.5 + Math.max(Math.cos(a) * 0.95, 1.0 * Math.sin(a) * (a > 1.3 ? 1 : 0)), bz - od.z * Math.sin(a) * 0.95);
+  } else {
+    stool.position.set(CFG.hip.x + Math.sin(B.fx) * 0.25, 0.45, CFG.hip.z - Math.sin(B.fz) * 0.25);
+    stool.rotation.set(-B.fz * 0.2, 0, -B.fx * 0.2);
+  }
+  const mid = B.hip.clone().lerp(B.top, 0.5);
+  torso.position.copy(mid);
+  const up = B.top.clone().sub(B.hip).normalize();
+  torso.quaternion.setFromUnitVectors(UP, up);
+  torso.rotateY(B.tw);
+  head.position.copy(B.top).addScaledVector(up, 1.1);
+  hat.position.copy(head.position).addScaledVector(up, 0.85);
+  hat.quaternion.copy(torso.quaternion);
+  legs.forEach((l, i) => { l.position.set(B.hip.x + (i ? 0.55 : -0.55) + Math.sin(B.fx) * 0.3, Math.max(0.3, B.hip.y - 0.7), B.hip.z + 0.3); });
+  for (const h of hands) {
+    const m = h.model;
+    m.root.position.copy(h.pos);
+    if (!h.planted && !body.down) {
+      const sy = surfaceY(h.pos.x, h.pos.z, 0.5);
+      m.ring.visible = true;
+      m.ring.position.set(h.pos.x, (isFinite(sy) ? sy : 0) + 0.04, h.pos.z);
+      m.ring.material.opacity = isFinite(sy) ? 0.4 : 0.2; // 生地の上なら濃く
+    } else m.ring.visible = false;
+    const c = h.planted ? 0.05 : 0.35;
+    m.fingers.forEach((f, j) => { f.rotation.x = -0.1 + c * 1.25; f.rotation.y = (j - 1.5) * 0.12 * (1 - c); });
+    m.thumbPv.rotation.y = 0.4 - c * 0.7; m.thumbPv.rotation.z = c * 0.6;
+    m.root.rotation.order = 'YXZ';
+    const dir = h.pos.clone().sub(h.S); dir.y = 0;
+    m.root.rotation.y = dir.lengthSq() > 1e-4 ? Math.atan2(-dir.x, -dir.z) : 0;
+    m.root.rotation.x = -0.1 - h.press * 0.2;
+    const a = h.arm;
+    a.shoulder.position.copy(h.S);
+    a.elbow.position.copy(h.elbow);
+    cylBetween(a.upper, h.S, h.elbow);
+    cylBetween(a.fore, h.elbow, h.wrist);
+  }
+}
+function updateFx(dt) {
+  for (let j = 0; j < PN; j++) {
+    if (pLife[j] <= 0) continue;
+    pLife[j] -= dt; pVel[j * 3 + 1] -= 8 * dt;
+    for (let k = 0; k < 3; k++) pPos[j * 3 + k] += pVel[j * 3 + k] * dt;
+    if (pPos[j * 3 + 1] < 0.03) { pPos[j * 3 + 1] = 0.03; pVel[j * 3] *= 0.5; pVel[j * 3 + 2] *= 0.5; pVel[j * 3 + 1] = 0; }
+    if (pLife[j] <= 0) pPos[j * 3 + 1] = -100;
+  }
+  pGeo.attributes.position.needsUpdate = true;
+  for (const g of ghosts) {
+    g.t += dt; g.m.position.y -= dt * (0.5 + g.t * 6);
+    g.m.scale.setScalar(Math.max(0.001, CFG.spacing * 0.9 * (1 - g.t * 1.6)));
+    g.m.material.opacity = Math.max(0, 1 - g.t * 1.6);
+  }
+  ghosts = ghosts.filter(g => { if (g.t > 0.65) { scene.remove(g.m); g.m.material.dispose(); return false; } return true; });
+  shake *= Math.exp(-dt * 8);
+}
+
+function hud(now) {
+  $('barFill').style.width = kneaded + '%';
+  const tip = $('tip');
+  const B = body;
+  const danger = !B.down && (B.fz > CFG.fallFwd * 0.75 || B.fz < -CFG.fallBack * 0.75 || Math.abs(B.fx) > CFG.fallSide * 0.75);
+  tip.className = B.down || failing || danger ? 'warn' : '';
+  tip.textContent = failing ? '新しい生地…' : done ? '' : CFG.stHint[stage];
+  $('stageName').textContent = done ? 'こね上がり' : CFG.stName[stage];
+  $('stageName').style.color = ['#f0dcae', '#e8e0c8', '#c9a874', '#fff6e6'][stage];
+  const t = startTime === null ? 0 : (done ? endTime : now) - startTime;
+  $('stat').textContent = (falls ? '転んだ ' + falls + '　' : '') + fmtTime(t);
+  $('help').textContent =
+    (padName ? '🎮 ' + padName.slice(0, 34) : '🎮 未接続（ボタンを押すと認識）') + '\n' +
+    'LT / RT：左 / 右のひじを上げる（離すとその手がつく）　左スティック上下：ひじを上げている間、体を前後に傾ける　右スティック：上げた手の位置（どこをこねるか）\n' +
+    '体を前へ乗り出すと、ついている手が生地を押し出す。両手を上げると落ちる　／　キーボード：F / J ひじ・W / S 前後・矢印 手の位置・R やり直し';
+}
+
+// =====================================================================
+// ループ
+// =====================================================================
+function resize() {
+  const w = Math.max(1, innerWidth), hh = Math.max(1, innerHeight);
+  renderer.setSize(w, hh);
+  camera.aspect = w / hh; camera.updateProjectionMatrix();
+  const k = Math.max(1, 1.55 / camera.aspect);
+  camZoom = k;
+}
+addEventListener('resize', resize);
+resize();
+resetGame();
+window.G = { get parts() { return parts; }, get shapeZ() { return shapeZ; }, hands, body, CFG, get kneaded() { return kneaded; }, get falls() { return falls; }, get failing() { return failing; }, get done() { return done; }, centroid };
+
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(1 / 30, (now - last) / 1000); last = now;
+  if (renderer.domElement.width !== Math.round(innerWidth * renderer.getPixelRatio())) resize();
+  updateStage(dt);
+  updateBody(dt);
+  if (parts.length) updateShape(dt);
+  if (parts.length) { updateFolds(dt); stepDough(1 / 60); }
+  updateFail(dt);
+  if (respawnT > 0) { respawnT -= dt; if (respawnT <= 0) { respawnT = 0; spawnDough(true); } }
+  updateFx(dt);
+  updateBake(dt);
+  syncDough();
+  syncBody();
+  // カメラは固定（右斜め上から）
+  const T = CFG.camTarget, D = CFG.camDist * camZoom;
+  camBase.set(T.x + Math.sin(camYaw) * Math.cos(camPitch) * D, T.y + Math.sin(camPitch) * D, T.z + Math.cos(camYaw) * Math.cos(camPitch) * D);
+  camera.position.copy(camBase);
+  if (shake > 0.01) camera.position.add(new THREE.Vector3((Math.random() - .5) * shake, (Math.random() - .5) * shake, 0));
+  camera.lookAt(CFG.camTarget);
+  hud(now);
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
