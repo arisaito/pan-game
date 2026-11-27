@@ -106,11 +106,11 @@ const CFG = {
   // めん棒・手
   pinLen: 7.0, pinR: 0.34,
   // 腕（13）：上腕をスティックで、前腕はぶら下がり
-  shoulderX: 2.4, shoulderY: 5.2, shoulderZ: 3.8, // 肩（手前・左右）
+  shoulderX: 2.4, shoulderY: 6.0, shoulderZ: 2.6, // 肩（手前・左右）。高めにして、上腕がななめ下を向く
   upperLen: 3.4, foreLen: 2.3,  // 上腕・前腕（力を抜くと、めん棒は生地の上にちょうど乗る長さ）
-  yawOut: 0.12, yawRange: 0.95, // 肩の左右の向き（ふだん外向き少し）と、スティックで回せる範囲
-  pitchRest: 0.55, pitchRange: 0.35,// 上腕の下向きの角度（ふだん）と、スティック上下で動く範囲
-  protract: 2.2,                // スティック上下で肩そのものも前後に出る（肩甲骨ごと前へ）
+  yawOut: 0.6, yawRange: 0.95,  // 肩の左右の向き（ふだんから外向き＝ひじが外に張って「< >」の形）と、スティックで回せる範囲
+  pitchRest: 0.9, pitchRange: 0.35, // 上腕の下向きの角度（ふだん。ななめ下）と、スティック上下で動く範囲
+  protract: 2.6,                // スティック上下で肩そのものも前後に出る（肩甲骨ごと前へ）
   shiftX: 1.2,                  // スティック左右で肩も少し横へ（体ごと寄る）
   jointK: 40, jointD: 7,        // 肩の関節のバネ（やわらかめ＝ひじも勢いで揺れる）
   handGravity: 22, handDamp: 0.9, // ぶら下がった手（＋めん棒）の重さと、揺れの残り方
@@ -146,7 +146,11 @@ const CFG = {
   ballHit: 0.9,                 // めん棒が当たった時のはじき返し
   ballMaxV: 8,                  // はじいた玉の速さの上限
   ballFric: 0.8,                // まな板の上で転がる玉の減速
-  ovenW: 1.5,                   // オーブンの口の幅の半分
+  ovenW: 5.3,                   // オーブンの口の幅の半分（まな板よりちょっと狭い）
+  // トリガーを奥まで押し続けると、生地がちぎれる（時間は画面に出さない）
+  fullPress: 0.985,             // これ以上の押し込みを「全力」とみなす（トリガーを奥まで＝10割。9割ならセーフ）
+  fullTear: false,              // 全力で押し続けるとちぎれる（難しすぎたので今は使わない）
+  fullTime: 1.4,                // 全力で押したまま生地に当て続けて、この秒数でちぎれる
   ovenGhost: 0.22,              // 丸め終わるまでのオーブンの透明度（うすく見えているだけ）
   ovenGap: 0.35,                // まな板の奥の端からオーブンの口まで
   R0: 1.7,                      // のばす前の生地の半径
@@ -274,7 +278,7 @@ function spawnDough(drop) {
     if (d < s * 1.5) springs.push({ a: parts[i], b: parts[j], rest0: d, rest: d, near: true, v0 });
     else if (d < s * 1.9) springs.push({ a: parts[i], b: parts[j], rest0: d, rest: d, near: false, v0 });
   }
-  shapeM = { a: 1, b: 0, c: 1 }; thin = 1; prog = 0;
+  shapeM = { a: 1, b: 0, c: 1 }; thin = 1; prog = 0; fullT = 0;
   stuckCount = 0;
   tension = 0; overT = 0; failing = null; respawnT = 0; spawning = !!drop; done = false;
   applyShape();
@@ -282,7 +286,7 @@ function spawnDough(drop) {
 }
 // 生地の形：水平の伸び（2×2 の対称行列）。厚さは体積が変わらないように 1/面積倍
 //   めん棒を押しながら転がすと、転がした向きに伸びて薄くなる（どの向きから転がしたかで形が決まる）
-let shapeM = { a: 1, b: 0, c: 1 }, thin = 1, prog = 0, phase = 'knead';
+let shapeM = { a: 1, b: 0, c: 1 }, thin = 1, prog = 0, phase = 'knead', fullT = 0;
 function rollShape(ux, uz, amt) {
   // M ← (I + amt·u uᵀ) · M
   const e00 = 1 + amt * ux * ux, e01 = amt * ux * uz, e11 = 1 + amt * uz * uz;
@@ -565,6 +569,11 @@ function step(dt) {
     if (pt.p.y <= floor + 0.01) { pt.q.x += (pt.p.x - pt.q.x) * CFG.fric; pt.q.z += (pt.p.z - pt.q.z) * CFG.fric; if (pt.q.y < pt.p.y) pt.q.y = pt.p.y; }
   }
   // めん棒を押しながら転がすと、その向きに伸びる
+  // 全力で押し続けている時間（めん棒が生地に当たっている間だけ数える。ゆるめると戻る）
+  if (CFG.fullTear && !failing && !done && phase === 'knead' && pinTouch > 0.02 && hands.some(h => h.press > CFG.fullPress)) {
+    fullT += dt;
+    if (fullT > CFG.fullTime) { fullT = 0; tear('押しつけすぎてちぎれた！'); }
+  } else fullT = Math.max(0, fullT - dt * 1.5);
   if (!failing && !done && phase === 'knead' && pinTouch > 0.02) {
     const press = (hands[0].press + hands[1].press) / 2;
     const vperp = Math.abs(pin.vel.x * perp.x + pin.vel.z * perp.z);
@@ -646,7 +655,7 @@ const oven = new THREE.Group();
   const bodyMat = new THREE.MeshStandardMaterial({ color: '#6b3a26', roughness: 0.7, transparent: true, opacity: CFG.ovenGhost });
   const inner = new THREE.MeshStandardMaterial({ color: '#140805', roughness: 1, emissive: '#000', transparent: true, opacity: CFG.ovenGhost });
   oven.userData.mats = [bodyMat, inner];
-  const W = 5.2, H = 3.6, D = 3.2, mw = CFG.ovenW, mh = 2.4;
+  const mw = CFG.ovenW, W = 2 * mw + 1.2, H = 3.6, D = 3.2, mh = 2.4;
   const back = new THREE.Mesh(new THREE.BoxGeometry(W, H, 0.4), bodyMat); back.position.set(0, H / 2, -D); oven.add(back);
   const top = new THREE.Mesh(new THREE.BoxGeometry(W, 0.4, D), bodyMat); top.position.set(0, H, -D / 2); oven.add(top);
   for (const sgn of [-1, 1]) {
@@ -826,7 +835,10 @@ function syncScene(t) {
     doughMat.color.copy(DOUGH0).lerp(DOUGH1, k);
     doughMat.roughness = 0.95 - 0.6 * k;
   }
-  doughMat.emissive.set('#ff3a1a').multiplyScalar(overT > 0 ? 0.25 + 0.2 * Math.sin(t * 40) : Math.max(0, (tension - CFG.TEAR * 0.7) / (CFG.TEAR * 0.3)) * 0.25);
+  // 全力で押し続けると、ちぎれそうで赤くなっていく（文字は出さない）
+  const fullDanger = THREE.MathUtils.clamp((fullT / CFG.fullTime - 0.35) / 0.65, 0, 1);
+  // 赤い点滅は今は使わない（ちぎれる判定をなくしたので）
+  doughMat.emissive.set(CFG.fullTear ? '#ff3a1a' : '#000000').multiplyScalar(CFG.fullTear ? fullDanger * (0.3 + 0.15 * Math.sin(t * 30)) : 0);
   // めん棒
   const mid = pin.a.clone().add(pin.b).multiplyScalar(0.5);
   pinGroup.position.copy(mid);
