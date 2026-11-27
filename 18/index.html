@@ -102,7 +102,7 @@ const CFG = {
   tiltSpring: 2.5,              // 台がまっすぐへ戻ろうとする力（弱い＝重い方へ傾いたまま）
   tiltDamp: 3.5,
   tiltBias: 0.4,                // 短い脚：放っておくと右手前へ傾こうとする
-  slide: 1.1,                   // 傾いた台の上で、生地が低い方へ滑る強さ
+  slide: 1.0,                   // 傾いた台の上で、生地が低い方へ滑る強さ（1＝重力そのまま）
   // めん棒・手
   pinLen: 7.0, pinR: 0.34,
   // 腕（13）：上腕をスティックで、前腕はぶら下がり
@@ -135,7 +135,9 @@ const CFG = {
   spacing: 0.42, RX: 1.7, RY: 1.05, RZ: 1.7,
   gravity: 26, damping: 0.985, iterations: 8,
   stiff: 0.5, yieldS: 0.2, plast: 2, recov: 0.5, // 押しつぶしても、少しずつまとまった形へ戻る
-  fric: 0.85,                   // 生地はまな板に少しくっつく
+  fric: 0.85,                   // （使わない）
+  fricK: 3,                     // まな板の上の摩擦：勢いが弱まる速さ（1秒あたり）。小さいほどよく滑る
+  fricPinned: 0.6,              // めん棒で押さえられている所の摩擦（1フレームあたり。止まりやすい）
   rollRate: 0.045,              // 押しながら転がした距離あたりの伸び
   // 18：転がすほど生地がまとまって、丸いかたまりになる
   ballRate: 0.9,                // 押しながら転がした量あたりのまとまり具合
@@ -542,6 +544,7 @@ function step(dt) {
       const pen = pt.p.y - bottom;
       pt.p.y = bottom; pt.q.y -= Math.min(pen, pt.q.y - bottom > 0 ? pt.q.y - bottom : 0); // 押し下げても勢いはつけない（はじけ飛ばない）
       penA += pen * (1 - tt); penB += pen * tt;
+      if (hands[0].press * (1 - tt) + hands[1].press * tt > 0.25) pt.pinned = 2; // めん棒で押さえられている
       // 押さえている間は、めん棒の下の生地がめん棒と一緒に動く（押さえて引けば、奥の生地も戻せる）
       const pAt = hands[0].press * (1 - tt) + hands[1].press * tt;
       if (pAt > CFG.stickPress && !pt.stuck && stuckCount < CFG.stickMax) {
@@ -572,8 +575,13 @@ function step(dt) {
   const sx = Math.sin(table.tx) * CFG.gravity * CFG.slide * dt * dt, sz = -Math.sin(table.tz) * CFG.gravity * CFG.slide * dt * dt;
   for (const pt of parts) {
     const floor = onBoard(pt.p) ? boardY(pt.p.x, pt.p.z) + pr : -40;
-    if (onBoard(pt.p) && pt.p.y <= floor + 0.05) { pt.p.x += sx; pt.p.z += sz; }
-    if (pt.p.y <= floor + 0.01) { pt.q.x += (pt.p.x - pt.q.x) * CFG.fric; pt.q.z += (pt.p.z - pt.q.z) * CFG.fric; if (pt.q.y < pt.p.y) pt.q.y = pt.p.y; }
+    // 坂を下る力（重力の、まな板に沿った成分）。押さえられている所はほとんど動かない
+    if (onBoard(pt.p) && pt.p.y <= floor + 0.05 && !pt.pinned) { pt.p.x += sx; pt.p.z += sz; }
+    if (pt.p.y <= floor + 0.01) {
+      const f = pt.pinned ? CFG.fricPinned : 1 - Math.exp(-CFG.fricK * dt);
+      pt.q.x += (pt.p.x - pt.q.x) * f; pt.q.z += (pt.p.z - pt.q.z) * f; if (pt.q.y < pt.p.y) pt.q.y = pt.p.y;
+    }
+    if (pt.pinned) pt.pinned--;
   }
   // めん棒を押しながら転がすと、その向きに伸びる
   // 全力で押し続けている時間（めん棒が生地に当たっている間だけ数える。ゆるめると戻る）
