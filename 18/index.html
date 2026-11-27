@@ -96,7 +96,7 @@ const $ = id => document.getElementById(id);
 //   傾ききると「ガタン！」と台が当たって揺れる。生地がまな板から滑り落ちたら失敗
 const CFG = {
   // ---- ガタつく台（18） ----
-  tiltMax: 0.13,                // 傾ける限界（ラジアン。ここで台の脚が床に当たる）
+  tiltMax: 0.24,                // 傾ける限界（ラジアン。ここで台の脚が床に当たる）
   tiltPress: 2.4,               // めん棒で押す力が台を傾ける強さ（押す強さ×中心からの距離）
   tiltDough: 0.15,              // 生地の重さが台を傾ける強さ（生地の中心のずれ×）
   tiltSpring: 2.5,              // 台がまっすぐへ戻ろうとする力（弱い＝重い方へ傾いたまま）
@@ -151,6 +151,12 @@ const CFG = {
   fullPress: 0.985,             // これ以上の押し込みを「全力」とみなす（トリガーを奥まで＝10割。9割ならセーフ）
   fullTear: false,              // 全力で押し続けるとちぎれる（難しすぎたので今は使わない）
   fullTime: 1.4,                // 全力で押したまま生地に当て続けて、この秒数でちぎれる
+  // ---- 材料（塩・砂糖・バター・レーズン）：まな板に落ちてくる。めん棒で生地まで運んで、押しつけて練り込む ----
+  ingAt: [0.12, 0.32, 0.52, 0.72], // まとまり具合がここまで来たら次の材料が落ちてくる
+  ingPress: 0.4,                // これ以上押しながら材料の上をめん棒が通ると、生地に練り込まれる
+  ingSlide: 0.7,                // 傾いた台の上で材料が転がる強さ
+  ingFric: 1.5,                 // 材料の減速
+  ingHit: 0.8,                  // めん棒に押された時に動く強さ
   ovenGhost: 0.22,              // 丸め終わるまでのオーブンの透明度（うすく見えているだけ）
   ovenGap: 0.35,                // まな板の奥の端からオーブンの口まで
   R0: 1.7,                      // のばす前の生地の半径
@@ -265,6 +271,7 @@ let pinTouch = 0, shapeT = 0, stuckCount = 0;
 let tension = 0, overT = 0, cover = 0, round = 0, failing = null, respawnT = 0, fails = 0, done = false;
 let startTime = null, endTime = null, spawning = false, edgeWarn = 0;
 function spawnDough(drop) {
+  removeIngredient(); ingNext = 0; ingMixed = 0;
   parts = []; springs = [];
   const s = CFG.spacing, { RX, RY, RZ } = CFG, pr = s * 0.5, y0 = RY + pr + (drop ? 6 : 0);
   for (let x = -RX; x <= RX + 1e-6; x += s) for (let y = -RY; y <= RY + 1e-6; y += s) for (let z = -RZ; z <= RZ + 1e-6; z += s) {
@@ -602,7 +609,8 @@ function step(dt) {
     const frac = out / parts.length; edgeWarn = Math.min(1, frac / CFG.FALL_FRAC);
     if (frac >= CFG.FALL_FRAC) fail('落ちた！');
   }
-  if (!failing && !done && !spawning && phase === 'knead' && prog >= 1) formBall();
+  // 材料を全部練り込んで、丸くまとまったら完成
+  if (!failing && !done && !spawning && phase === 'knead' && prog >= 1 && ingMixed >= ING.length) formBall();
 }
 
 // 目標の円がどれだけ埋まったか・どれだけ丸いか
@@ -774,6 +782,74 @@ function updateBall(dt) {
     bread.rotation.set(-table.tz, bread.userData.t * 0.3, -table.tx);
   }
 }
+// ---- 材料 ----
+const ING = [
+  { name: '塩', r: 0.32, make: () => { const g = new THREE.Group(); for (let i = 0; i < 7; i++) { const m = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, 0.16), new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.4 })); m.position.set((Math.random() - .5) * 0.35, (Math.random() - .5) * 0.2, (Math.random() - .5) * 0.35); m.rotation.set(Math.random() * 3, Math.random() * 3, 0); g.add(m); } return g; } },
+  { name: '砂糖', r: 0.36, make: () => { const g = new THREE.Group(); for (let i = 0; i < 2; i++) { const m = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.3, 0.36), new THREE.MeshStandardMaterial({ color: '#f7f3ea', roughness: 0.6 })); m.position.set(i * 0.25 - 0.12, i * 0.12, 0); m.rotation.y = i; g.add(m); } return g; } },
+  { name: 'バター', r: 0.42, make: () => { const g = new THREE.Group(); const m = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.42, 0.5), new THREE.MeshStandardMaterial({ color: '#ffe08a', roughness: 0.35 })); g.add(m); return g; } },
+  { name: 'レーズン', r: 0.38, make: () => { const g = new THREE.Group(); for (let i = 0; i < 6; i++) { const m = new THREE.Mesh(new THREE.SphereGeometry(0.13, 10, 8), new THREE.MeshStandardMaterial({ color: '#3a1d1a', roughness: 0.5 })); m.position.set((Math.random() - .5) * 0.4, (Math.random() - .5) * 0.2, (Math.random() - .5) * 0.4); m.scale.set(1, 0.75, 1); g.add(m); } return g; } },
+];
+let ing = null, ingNext = 0, ingMixed = 0;
+function dropIngredient() {
+  const def = ING[ingNext];
+  const mesh = def.make(); mesh.traverse(o => { if (o.isMesh) o.castShadow = true; }); scene.add(mesh);
+  // 生地から少し離れたところに落ちてくる
+  const c = parts.length ? centroid() : new THREE.Vector3();
+  let x, z;
+  for (let k = 0; k < 20; k++) { x = (Math.random() * 2 - 1) * (CFG.BW - 1.5); z = (Math.random() * 2 - 1) * (CFG.BD - 1.2); if (Math.hypot(x - c.x, z - c.z) > 3) break; }
+  ing = { def, mesh, p: new THREE.Vector3(x, 6, z), v: new THREE.Vector3(), r: def.r, spin: 0 };
+}
+function removeIngredient() { if (ing) { scene.remove(ing.mesh); ing = null; } }
+// 材料の真下の生地の高さ
+function doughTop(x, z, r) { let top = -Infinity; for (const pt of parts) if ((pt.p.x - x) ** 2 + (pt.p.z - z) ** 2 < r * r) top = Math.max(top, pt.p.y + CFG.spacing * 0.5); return top; }
+function updateIngredient(dt) {
+  if (phase !== 'knead' || failing) return;
+  // 次の材料を落とす
+  if (!ing && ingNext < ING.length && prog >= CFG.ingAt[ingNext] && !spawning) dropIngredient();
+  if (!ing) return;
+  const g = ing, R = g.r;
+  g.v.y -= CFG.gravity * dt;
+  g.p.addScaledVector(g.v, dt);
+  const onB = Math.abs(g.p.x) < CFG.BW && Math.abs(g.p.z) < CFG.BD;
+  const dTop = doughTop(g.p.x, g.p.z, 0.55);
+  const fy = Math.max(onB ? boardY(g.p.x, g.p.z) : -99, dTop) + R * 0.6;
+  let onDough = false;
+  if (g.p.y < fy) {
+    g.p.y = fy; if (g.v.y < -3) rumble(0.2, 0.15, 40);
+    g.v.y = Math.max(0, -g.v.y * 0.2);
+    onDough = isFinite(dTop) && dTop > (onB ? boardY(g.p.x, g.p.z) : -99) + 0.1;
+    // 台の傾きで転がる（生地の上ではあまり動かない）
+    if (onB && !onDough) { g.v.x += Math.sin(table.tx) * CFG.gravity * CFG.ingSlide * dt; g.v.z += -Math.sin(table.tz) * CFG.gravity * CFG.ingSlide * dt; }
+    const f = Math.exp(-(onDough ? CFG.ingFric * 4 : CFG.ingFric) * dt);
+    g.v.x *= f; g.v.z *= f;
+  }
+  // めん棒に押される
+  const cp = segClosest3(g.p, pin.a, pin.b, new THREE.Vector3());
+  const d = g.p.clone().sub(cp), dist = d.length(), minD = R + CFG.pinR;
+  const pressAt = (hands[0].press + hands[1].press) / 2;
+  if (dist < minD + 0.1) {
+    // 生地の上で、押さえためん棒が上を通った → 練り込まれた！
+    if (onDough && pressAt > CFG.ingPress) {
+      ingMixed++; ingNext++;
+      puff(g.p.clone(), 18, 0.7); rumble(0.6, 0.6, 160);
+      popup(g.p.clone().setY(g.p.y + 1.5), g.def.name + ' 入った！', '#ffe08a', false);
+      removeIngredient();
+      return;
+    }
+    if (dist < minD && dist > 1e-4) {
+      const n = d.divideScalar(dist), hn = new THREE.Vector3(n.x, 0, n.z);
+      if (hn.lengthSq() < 1e-4) hn.set(0, 0, -1); hn.normalize();
+      g.p.addScaledVector(hn, minD - dist);
+      const rel = pin.vel.dot(hn) - g.v.dot(hn);
+      if (rel > 0) g.v.addScaledVector(hn, rel * CFG.ingHit);
+    }
+  }
+  // 転がる見た目
+  g.spin += Math.hypot(g.v.x, g.v.z) * dt / R;
+  g.mesh.position.copy(g.p); g.mesh.rotation.set(g.spin * Math.sign(g.v.z || 1), 0, -g.spin * Math.sign(g.v.x || 1) * 0.5);
+  // まな板から落ちた → もう一度落ちてくる
+  if (g.p.y < -6) { removeIngredient(); rumble(0.4, 0.3, 120); }
+}
 function clearBall() {
   phase = 'knead'; ballMesh.visible = false; mc.visible = true; setOvenOpacity(CFG.ovenGhost); oven.scale.setScalar(1);
   oven.userData.inner.emissive.set('#000');
@@ -913,6 +989,7 @@ function hud(now) {
   $('help').textContent =
     '左右スティック：腕を動かす\n' +
     'LT / RT：めん棒を押さえる\n' +
+    '落ちてくる材料は、めん棒で生地まで運んで押しつける\n' +
     '丸めたら、奥のオーブンへシュート';
 }
 
@@ -941,6 +1018,7 @@ function frame(now) {
   updateTable(dt);
   if (parts.length) step(1 / 60);
   updateBall(dt);
+  updateIngredient(dt);
   if (failing) {
     failing.t += dt;
     if (failing.t >= CFG.FAIL_SHOW && parts.length) { parts = []; springs = []; respawnT = 0.3; }
