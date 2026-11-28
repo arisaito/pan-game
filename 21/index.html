@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>21 三つ編みパン 3D</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; }
+  body { font-family: "Hiragino Maru Gothic ProN", "Hiragino Sans", system-ui, sans-serif; color: #fff3e0; }
+  #help {
+    position: fixed; left: 12px; bottom: 10px; font-size: 12px; line-height: 1.6;
+    background: rgba(0,0,0,.45); padding: 6px 10px; border-radius: 8px; pointer-events: none; white-space: pre;
+  }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="help"></div>
+<script type="module">
+import * as THREE from 'three';
+
+const $ = id => document.getElementById(id);
+
+// =====================================================================
+// 21：三つ編みパン
+//   紐のような生地が3本。それぞれにボタンが決まっている（X / Y / B）
+//   三つ編みのやり方：外側の1本を、真ん中の上へ重ねる。左右どちらの番かは毎回ランダム（矢印で指示）
+//   いま外側（左 or 右の番）にいる紐の「ボタン」を押すと、その紐が真ん中へ重なる
+//   紐は編むたびに位置が入れかわるので、どのボタンがどこにいるか、だんだん分からなくなる
+//   ちがう紐のボタンを押すと、からまって失敗（その回はやり直し）
+//   最後まで編めたら成功 → 焼き上がり
+// =====================================================================
+const CFG = {
+  crossings: 12,               // 何回編んだら完成か
+  topZ: -3.6,                  // 編みはじめ（奥のとめた所）
+  dz: 0.45,                    // 1回編むごとに進む長さ
+  tight: 0.42,                 // 編んだ所の、紐どうしの間隔
+  loose: 1.45,                 // まだ編んでいない所の、紐どうしの間隔
+  endZ: 4.4,                   // 紐の先（手前）
+  r: 0.3,                      // 紐の太さ（半径）
+  over: 0.34, under: 0.0,      // 重なる時の高さ（上になる紐／下になる紐）
+  crossTime: 0.35,             // 1回の編みのアニメーションの時間
+  BW: 6.5, BD: 6,
+};
+
+// ボタン：紐ごとに決まっている（コントローラーのボタン番号・キーボード・色・表示）
+const STRANDS = [
+  { btn: 2, key: 'KeyJ', label: 'X', color: '#3b82f6' },
+  { btn: 3, key: 'KeyK', label: 'Y', color: '#eab308' },
+  { btn: 1, key: 'KeyL', label: 'B', color: '#ef4444' },
+];
+
+// =====================================================================
+// three.js
+// =====================================================================
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.prepend(renderer.domElement);
+const scene = new THREE.Scene(); scene.background = new THREE.Color('#000');
+const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 200);
+scene.add(new THREE.HemisphereLight('#fff4e0', '#3a2a1c', 1.0));
+const sun = new THREE.DirectionalLight('#fff1dc', 1.7);
+sun.position.set(-4, 14, 6); sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -9, right: 9, top: 9, bottom: -9, near: 1, far: 40 });
+scene.add(sun);
+function woodTexture(w, h, base, seed0) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const b = c.getContext('2d'); b.fillStyle = base; b.fillRect(0, 0, w, h);
+  let seed = seed0; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (let i = 0; i < 80; i++) {
+    const y0 = rnd() * h, amp = 2 + rnd() * 8, freq = 0.003 + rnd() * 0.008, ph = rnd() * 6;
+    b.strokeStyle = `rgba(${110 + rnd() * 40 | 0},${65 + rnd() * 30 | 0},25,${0.06 + rnd() * 0.14})`;
+    b.lineWidth = 1 + rnd() * 3; b.beginPath();
+    for (let x = 0; x <= w; x += 8) { const y = y0 + Math.sin(x * freq + ph) * amp; x ? b.lineTo(x, y) : b.moveTo(x, y); }
+    b.stroke();
+  }
+  for (let i = 0; i < 2000; i++) { b.fillStyle = `rgba(255,252,240,${rnd() * 0.22})`; b.beginPath(); b.arc(rnd() * w, rnd() * h, rnd() * 2.2, 0, 7); b.fill(); }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; return t;
+}
+const board = new THREE.Mesh(new THREE.BoxGeometry(CFG.BW * 2, 0.5, CFG.BD * 2),
+  [new THREE.MeshStandardMaterial({ color: '#b98650' }), new THREE.MeshStandardMaterial({ color: '#b98650' }), new THREE.MeshStandardMaterial({ map: woodTexture(1600, 1400, '#d9ab72', 7), roughness: 0.75 }), new THREE.MeshStandardMaterial({ color: '#b98650' }), new THREE.MeshStandardMaterial({ color: '#b98650' }), new THREE.MeshStandardMaterial({ color: '#b98650' })]);
+board.position.y = -0.25; board.receiveShadow = true; scene.add(board);
+
+// 生地の紐
+const doughMat = new THREE.MeshStandardMaterial({ color: '#ecd9b2', roughness: 0.8 });
+const DOUGH = new THREE.Color('#ecd9b2'), CRUST = new THREE.Color('#b8692a');
+const tubes = STRANDS.map(() => { const m = new THREE.Mesh(new THREE.BufferGeometry(), doughMat); m.castShadow = true; m.receiveShadow = true; scene.add(m); return m; });
+// 編みはじめをとめているかたまり
+const knot = new THREE.Mesh(new THREE.SphereGeometry(0.62, 24, 16), doughMat); knot.scale.set(1.3, 0.7, 0.9); knot.castShadow = true; scene.add(knot);
+knot.position.set(0, 0.32, CFG.topZ - 0.15);
+
+// 紐の先のボタン表示（色つきの丸に文字）
+function labelSprite(text, color) {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = color; g.beginPath(); g.arc(64, 64, 58, 0, 7); g.fill();
+  g.lineWidth = 8; g.strokeStyle = 'rgba(255,255,255,.9)'; g.stroke();
+  g.fillStyle = '#fff'; g.font = 'bold 72px system-ui, sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(text, 64, 70);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: t, depthTest: false }));
+  s.scale.set(0.75, 0.75, 1); scene.add(s); return s;
+}
+const labels = STRANDS.map(s => labelSprite(s.label, s.color));
+// 次はどっちの番か（左／右）：台の上の矢印
+const arrow = new THREE.Mesh(new THREE.ConeGeometry(0.28, 0.6, 3), new THREE.MeshBasicMaterial({ color: '#fff3e0', transparent: true, opacity: 0.85 }));
+arrow.rotation.x = -Math.PI / 2; scene.add(arrow);
+
+// =====================================================================
+// 編む状態
+//   col[s] ＝ 紐 s がいま何列目にいるか（0＝左, 1＝真ん中, 2＝右）
+//   path[s] ＝ 紐 s の、編んだ所の通り道（各段ごとの位置と高さ）
+// =====================================================================
+let col, steps, side, mistakes, done, anim, wobble, startT, endT, bakeT, sameRun = 0, arrowPop = 0;
+// 次に編む側：毎回ランダム（ただし同じ側は3回までしか続かない）
+function nextSide() {
+  let s2 = Math.random() < 0.5 ? 0 : 1;
+  if (side !== undefined && s2 === side) { sameRun++; if (sameRun >= 3) { s2 = 1 - side; sameRun = 0; } } else sameRun = 0;
+  arrowPop = 1;
+  return s2;
+}
+function reset() {
+  col = [0, 1, 2];
+  steps = [];          // 1回ごとに { mover, middle, from, to }
+  sameRun = 0; side = nextSide(); // 0＝左の番、1＝右の番（毎回ランダム）
+  mistakes = 0; done = false; anim = null; wobble = [0, 0, 0]; startT = null; endT = null; bakeT = 0;
+  doughMat.color.copy(DOUGH); doughMat.roughness = 0.8; doughMat.emissive.set('#000');
+  build(1);
+}
+const colX = (c, spacing) => (c - 1) * spacing;
+
+// 紐の形を作る：編んだ段 → 広がり始め → まっすぐ手前へ
+function strandPoints(s, animT) {
+  const pts = [];
+  const { topZ, dz, tight, loose, endZ, r } = CFG;
+  const y0 = r;
+  // 編みはじめ：3本が少し寄って、とめた所から出る
+  let c0 = s;  // はじめは s 列目
+  pts.push(new THREE.Vector3(colX(c0, tight * 0.6), y0, topZ - 0.1));
+  let c = c0;
+  const n = steps.length;
+  for (let k = 0; k < n; k++) {
+    const st = steps[k];
+    const t = k === n - 1 && anim ? animT : 1;   // 最後の段はアニメーション中
+    const zMid = topZ + (k + 0.5) * dz, zEnd = topZ + (k + 1) * dz;
+    let mid, end, y;
+    if (s === st.mover) { mid = (st.from + 1) / 2; end = 1; y = CFG.over; }       // 外側 → 真ん中（上を通る）
+    else if (s === st.middle) { mid = (1 + st.from) / 2; end = st.from; y = CFG.under; } // 真ん中 → 外側（下を通る）
+    else { mid = c; end = c; y = 0.1; }
+    // アニメーション：t に合わせて、元の列から新しい列へ
+    const midX = colX(c + (mid - c) * t, tight), endX = colX(c + (end - c) * t, tight);
+    pts.push(new THREE.Vector3(midX, y0 + y * Math.sin(Math.PI * 0.5 * Math.min(1, t * 1.5)), zMid));
+    pts.push(new THREE.Vector3(endX, y0, zEnd));
+    c = c + (end - c) * t;
+  }
+  // まだ編んでいない所：広がって、まっすぐ手前へ
+  const zB = topZ + n * dz;
+  const xL = colX(c, loose) + Math.sin(performance.now() / 60) * 0.06 * wobble[s];
+  pts.push(new THREE.Vector3((colX(c, tight) + xL) / 2, y0, zB + 0.9));
+  pts.push(new THREE.Vector3(xL, y0, zB + 2.0));
+  pts.push(new THREE.Vector3(xL, y0, endZ));
+  return pts;
+}
+function build(animT) {
+  tubes.forEach((m, s) => {
+    const pts = strandPoints(s, animT);
+    const curve = new THREE.CatmullRomCurve3(pts, false, 'centripetal');
+    m.geometry.dispose();
+    m.geometry = new THREE.TubeGeometry(curve, 160, CFG.r, 14, false);
+    // 先は丸く（球でふさぐ）
+    if (!m.userData.cap) { m.userData.cap = new THREE.Mesh(new THREE.SphereGeometry(CFG.r, 16, 12), doughMat); m.userData.cap.castShadow = true; scene.add(m.userData.cap); }
+    m.userData.cap.position.copy(pts[pts.length - 1]);
+    labels[s].position.copy(pts[pts.length - 1]).add(new THREE.Vector3(0, 0.75, 0.35));
+  });
+  // 次の番の矢印
+  const zB = CFG.topZ + steps.length * CFG.dz;
+  arrow.visible = !done;
+  arrow.position.set(side === 0 ? -CFG.loose - 0.9 : CFG.loose + 0.9, 0.05, zB + 2.2);
+  arrow.rotation.set(-Math.PI / 2, 0, side === 0 ? -Math.PI / 2 : Math.PI / 2);
+}
+
+// =====================================================================
+// 入力：ボタンを押した瞬間
+// =====================================================================
+const keys = {}, prevBtn = {};
+addEventListener('keydown', e => { if (!keys[e.code]) onPress(e.code); keys[e.code] = true; if (e.code === 'KeyR') reset(); });
+addEventListener('keyup', e => { keys[e.code] = false; });
+let curPad = null;
+function pollPad() {
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let pad = null; for (const p of pads) if (p && p.connected) { pad = p; break; }
+  curPad = pad; if (!pad) return;
+  const check = (i, code) => { const v = pad.buttons[i] && pad.buttons[i].pressed; if (v && !prevBtn[i]) onPress(code); prevBtn[i] = v; };
+  STRANDS.forEach((st, s) => check(st.btn, 'pad' + s));
+  check(9, 'start');
+}
+function rumble(strong, weak, ms) {
+  const act = curPad && curPad.vibrationActuator;
+  if (act && act.playEffect) act.playEffect('dual-rumble', { duration: ms, strongMagnitude: Math.min(1, strong), weakMagnitude: Math.min(1, weak) }).catch(() => {});
+}
+function onPress(code) {
+  if (code === 'start') { reset(); return; }
+  let s = STRANDS.findIndex(st => st.key === code);
+  if (code.startsWith('pad')) s = +code.slice(3);
+  if (s < 0 || done || anim) return;
+  if (startT === null) startT = performance.now();
+  const want = side === 0 ? 0 : 2; // 外側の列
+  if (col[s] !== want) {
+    // ちがう紐：からまる（失敗。その回はやり直し）
+    mistakes++; wobble[s] = 1; rumble(0.8, 0.5, 200);
+    puff(labels[s].position.clone().setY(0.4), 14, 0.6);
+    return;
+  }
+  // 正しい：外側の紐を真ん中の上へ
+  const middle = col.indexOf(1);
+  steps.push({ mover: s, middle, from: want });
+  anim = { t: 0, mover: s, middle, from: want };
+  rumble(0.3, 0.2, 60);
+}
+function finishCross() {
+  const { mover, middle, from } = anim;
+  col[mover] = 1; col[middle] = from;
+  anim = null; side = nextSide();
+  if (steps.length >= CFG.crossings) { done = true; endT = performance.now(); bakeT = 0.001; rumble(1, 1, 400); puff(new THREE.Vector3(0, 0.6, CFG.topZ + steps.length * CFG.dz * 0.5), 50, 1.3); }
+}
+
+// =====================================================================
+// 演出
+// =====================================================================
+const PN = 300;
+const pPos = new Float32Array(PN * 3).fill(-100), pVel = new Float32Array(PN * 3), pLife = new Float32Array(PN);
+const pGeo = new THREE.BufferGeometry(); pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+scene.add(new THREE.Points(pGeo, new THREE.PointsMaterial({ color: '#fffaf0', size: 0.09, transparent: true, opacity: 0.85, depthWrite: false })));
+let pNext = 0;
+function puff(at, n, power) {
+  for (let i = 0; i < n; i++) {
+    const j = pNext; pNext = (pNext + 1) % PN;
+    const a = Math.random() * Math.PI * 2, sp = (1 + Math.random() * 3) * power;
+    pPos[j * 3] = at.x + Math.cos(a) * 0.4; pPos[j * 3 + 1] = Math.max(0.05, at.y); pPos[j * 3 + 2] = at.z + Math.sin(a) * 0.4;
+    pVel[j * 3] = Math.cos(a) * sp; pVel[j * 3 + 1] = 1 + Math.random() * 2.5 * power; pVel[j * 3 + 2] = Math.sin(a) * sp;
+    pLife[j] = 0.5 + Math.random() * 0.7;
+  }
+}
+function updateFx(dt) {
+  for (let j = 0; j < PN; j++) {
+    if (pLife[j] <= 0) continue;
+    pLife[j] -= dt; pVel[j * 3 + 1] -= 8 * dt;
+    for (let k = 0; k < 3; k++) pPos[j * 3 + k] += pVel[j * 3 + k] * dt;
+    if (pPos[j * 3 + 1] < 0.03) { pPos[j * 3 + 1] = 0.03; pVel[j * 3] *= 0.5; pVel[j * 3 + 2] *= 0.5; pVel[j * 3 + 1] = 0; }
+    if (pLife[j] <= 0) pPos[j * 3 + 1] = -100;
+  }
+  pGeo.attributes.position.needsUpdate = true;
+}
+
+// =====================================================================
+// ループ
+// =====================================================================
+function resize() {
+  const w = Math.max(1, innerWidth), h = Math.max(1, innerHeight);
+  renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix();
+  const k = Math.max(1, 1.3 / camera.aspect);
+  camera.position.set(0, 11 * k, 10 * k); camera.lookAt(0, 0, 0.9);
+}
+addEventListener('resize', resize);
+resize();
+reset();
+window.G = { get col() { return col; }, get steps() { return steps; }, get side() { return side; }, get mistakes() { return mistakes; }, get done() { return done; }, press: onPress };
+
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(1 / 30, (now - last) / 1000); last = now;
+  pollPad();
+  let rebuild = false;
+  if (anim) { anim.t += dt / CFG.crossTime; rebuild = true; if (anim.t >= 1) { anim.t = 1; build(1); finishCross(); } }
+  for (let s = 0; s < 3; s++) if (wobble[s] > 0) { wobble[s] = Math.max(0, wobble[s] - dt * 2); rebuild = true; }
+  if (rebuild && anim) build(anim.t); else if (rebuild) build(1);
+  // 焼き上がり：こんがり色になって、少しふくらむ
+  if (bakeT) {
+    bakeT += dt;
+    const k = Math.min(1, bakeT / 1.5);
+    doughMat.color.copy(DOUGH).lerp(CRUST, k); doughMat.roughness = 0.8 - 0.3 * k;
+    labels.forEach(l => l.material.opacity = 1 - k);
+  } else labels.forEach(l => l.material.opacity = 1);
+  // 次の側の矢印：変わった時にぽんっと大きくなる
+  arrowPop = Math.max(0, arrowPop - dt * 3);
+  arrow.scale.setScalar(1.6 + arrowPop * 0.8);
+  arrow.material.color.set(side === 0 ? '#9fd3ff' : '#ffb3a3');
+  updateFx(dt);
+  $('help').textContent =
+    'X / Y / B：その紐を動かす（キーボード J / K / L）\n' +
+    '外側の紐を真ん中の上へ。左右どちらの番かは毎回かわる（矢印の側）\n' +
+    (done ? `完成！ 失敗 ${mistakes} 回　Start / R でもう一度` : `${steps.length} / ${CFG.crossings} 回`);
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
