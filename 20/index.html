@@ -59,20 +59,31 @@ const CFG = {
   thumbMax: 1.0,                // 親指を曲げきった時の強さ
   fingerMax: 1.0,               // 4本の指を曲げきった時の強さ
   grabAt: 0.8,                  // 親指も4本の指もこれ以上曲がると「にぎった」
-  grabReach: 1.1,               // 手のひらの下この距離に生地があれば、つかめる
-  grabR: 0.9,                   // つかんだ時に持ち上がる生地の範囲（手のひらの下）
+  grabReach: 1.8,               // 手のひらの下この距離に生地があれば、つかめる
+  grabR: 1.15,                  // つかんだ時に持ち上がる生地の範囲（手のひらの下）
   palmR: 1.0,                   // 手のひらの当たり判定（生地を押す）
   // 叩きつけ
   slamSpeed: 7,                 // これより速く下ろして生地がまな板に当たると「叩きつけ」
-  slamGain: 5,                  // 1回の叩きつけで進むこね具合（強いほど少し多い）
+  slamGain: 7.5,                  // 1回の叩きつけで進むこね具合（強いほど少し多い）
+  handRecoil: 9,                // 叩きつけた時、手が反動で跳ね上がる速さ
+  bounceUp: 22,                 // 叩きつけた時に生地が跳ねる強さ（上へ）
+  bounceSide: 6.5,              // 叩きつけた時に生地が横へずれる強さ（向きはランダム）
   throwWindow: 2.5,             // 投げてからこの秒数のうちにまな板に落ちたら「叩きつけ」に数える
   // 生地
-  spacing: 0.42, doughR: 1.45, doughRY: 0.95,
+  spacing: 0.42, doughR: 1.2, doughRY: 0.8, // 生地の大きさ（半径・高さ）
   gravity: 26, damping: 0.985, iterations: 8,
+  roundUp: 2.5,                 // こね具合100%で、形が丸く戻る速さがこれだけ増える
+  firmUp: 0.25,                 // こね具合100%で、生地の硬さがこれだけ増える
   stiff: 0.35, yieldS: 0.12, plast: 2, recov: 0.4,
   fric: 0.5,
   // オーブン（奥。こね上がるまでは半透明）
   ovenW: 5.0, ovenGap: 0.3, ovenGhost: 0.2,
+  // ガタつくまな板：生地のいる側へ傾く（18と同じ）
+  tiltMax: 0.2,                 // 傾ける限界（ラジアン）
+  tiltDough: 0.9,               // 生地の重さで傾く強さ（生地の中心のずれ×）
+  tiltSpring: 2.5, tiltDamp: 3.5,
+  slide: 1.0,                   // 傾いた台の上で、生地が低い方へ滑る強さ（1＝重力そのまま）
+  fricK: 4,                     // まな板の上の摩擦（1秒あたり。小さいほどよく滑る）
   // まな板
   BW: 6, BD: 4,
   FALL_FRAC: 0.55,
@@ -124,11 +135,16 @@ const boardMesh = new THREE.Mesh(new THREE.BoxGeometry(CFG.BW * 2, 0.5, CFG.BD *
 boardMesh.position.y = -0.25; boardMesh.receiveShadow = true; scene.add(boardMesh);
 
 // ---- 生地の見た目 ----
-const MC_S = 6.5, MC_RES = 52;
-const doughMat = new THREE.MeshStandardMaterial({ color: '#e6d2a8', roughness: 0.85 });
-const mc = new MarchingCubes(MC_RES, doughMat, false, false, 120000);
-mc.scale.set(MC_S, MC_S, MC_S); mc.castShadow = true; mc.receiveShadow = true; mc.isolation = 80;
-scene.add(mc);
+const MC_S = 6.5;
+const doughMat = new THREE.MeshStandardMaterial({ color: '#e6d2a8', roughness: 0.85, flatShading: true }); // 面ごとにカクカク
+// こね具合に応じて、ポリゴンの細かさを上げていく（最初はカクカク → まとまるほどなめらかで丸く）
+const MC_LEVELS = [18, 24, 32, 44];  // こね具合 0〜25% / 25〜50% / 50〜75% / 75%〜 の細かさ
+const mcs = MC_LEVELS.map(res => {
+  const m = new MarchingCubes(res, doughMat, false, false, 120000);
+  m.scale.set(MC_S, MC_S, MC_S); m.castShadow = true; m.receiveShadow = true; m.isolation = 80; m.visible = false;
+  scene.add(m); return m;
+});
+let mc = mcs[0]; mc.visible = true;
 const BALL = 0.055, SUB = 12;
 const DOUGH0 = new THREE.Color('#cdb487'), DOUGH1 = new THREE.Color('#fff4de');
 
@@ -227,9 +243,33 @@ function spawnDough(drop) {
   }
   hand.grabbed = null; failing = 0;
 }
-function resetGame() { prog = 0; fails = 0; done = false; startTime = null; closeOven(); clearBread(); spawnDough(false); }
+function resetGame() { Object.assign(table, { tx: 0, vx: 0, tz: 0, vz: 0 }); prog = 0; fails = 0; done = false; startTime = null; closeOven(); clearBread(); spawnDough(false); }
 const centroid = () => { const c = new THREE.Vector3(); for (const p of parts) c.add(p.p); return c.divideScalar(Math.max(1, parts.length)); };
 const onBoard = p => Math.abs(p.x) < CFG.BW && Math.abs(p.z) < CFG.BD;
+// 台の傾き：tx＞0 で右が下がる、tz＞0 で奥が下がる
+const table = { tx: 0, vx: 0, tz: 0, vz: 0, hitT: 0 };
+const boardY = (x, z) => -x * Math.tan(table.tx) + z * Math.tan(table.tz);
+function updateTable(dt) {
+  // 生地の重さ：生地がいる側へ傾く（つかんで持ち上げている分は、台にのっていない）
+  let mx = 0, mz = 0, n = 0;
+  for (const pt of parts) if (!pt.held && onBoard(pt.p) && pt.p.y < boardY(pt.p.x, pt.p.z) + 2) { mx += pt.p.x; mz += -pt.p.z; n++; }
+  if (n) { mx /= n; mz /= n; }
+  const w = parts.length ? n / parts.length : 0;
+  const ax = CFG.tiltDough * mx * w * 0.12 - CFG.tiltSpring * table.tx - CFG.tiltDamp * table.vx;
+  const az = CFG.tiltDough * mz * w * 0.12 - CFG.tiltSpring * table.tz - CFG.tiltDamp * table.vz;
+  table.vx += ax * dt; table.vz += az * dt;
+  table.tx += table.vx * dt; table.tz += table.vz * dt;
+  table.hitT = Math.max(0, table.hitT - dt);
+  for (const k of ['x', 'z']) {
+    const t = 't' + k, v = 'v' + k;
+    if (Math.abs(table[t]) > CFG.tiltMax) {
+      const sp = Math.abs(table[v]);
+      table[t] = Math.sign(table[t]) * CFG.tiltMax; table[v] = -table[v] * 0.25;
+      if (sp > 0.15 && table.hitT <= 0) { table.hitT = 0.25; rumble(Math.min(1, 0.3 + sp), 0.5, 120); shake = Math.max(shake, Math.min(0.3, sp * 0.4)); }
+    }
+  }
+  boardMesh.rotation.set(-table.tz, 0, -table.tx);
+}
 // オーブンの口（こね上がった後だけ入れる）。口の床はまな板と同じ高さ
 const inOven = p => ovenOpen && p.z <= -CFG.BD && p.z > -CFG.BD - CFG.ovenGap - 3.2 && Math.abs(p.x) < CFG.ovenW && p.y < 2.6;
 
@@ -284,14 +324,16 @@ function updateHand(dt) {
   const tz = CFG.homeZ + sz * CFG.moveZ;
   const ry = -THREE.MathUtils.clamp(inp.ry, -1, 1); // 上＝持ち上げる
   const ty = ry >= 0 ? CFG.yRest + (CFG.yHigh - CFG.yRest) * ry : CFG.yRest + (CFG.yRest - CFG.yLow) * ry;
+  // 高さは、手の真下のまな板の面からはかる（まな板が傾いて低くなった所にも手が届く）
+  const baseY = Math.abs(tx) < CFG.BW && Math.abs(tz) < CFG.BD ? boardY(hand.pos.x, hand.pos.z) : 0;
   // 手はバネで追いかける（重さがある：急に動かすと勢いがつく）
   hand.vel.x += (CFG.handK * (tx - hand.pos.x) - CFG.handD * hand.vel.x) * dt;
-  hand.vel.y += (CFG.handK * (ty - hand.pos.y) - CFG.handD * hand.vel.y) * dt;
+  hand.vel.y += (CFG.handK * (ty + baseY - hand.pos.y) - CFG.handD * hand.vel.y) * dt;
   hand.vel.z += (CFG.handK * (tz - hand.pos.z) - CFG.handD * hand.vel.z) * dt;
   hand.prev.copy(hand.pos);
   hand.pos.addScaledVector(hand.vel, dt);
   // まな板より下には行かない
-  const minY = 0.45;
+  const minY = (onBoard(hand.pos) ? boardY(hand.pos.x, hand.pos.z) : 0) + 0.45;
   if (hand.pos.y < minY) { hand.pos.y = minY; if (hand.vel.y < 0) hand.vel.y = 0; }
   // 動きに合わせて少し傾く（見た目）
   hand.tilt += (THREE.MathUtils.clamp(-hand.vel.y * 0.04 + hand.vel.z * 0.03, -0.5, 0.5) - hand.tilt) * Math.min(1, dt * 8);
@@ -301,11 +343,13 @@ function updateHand(dt) {
   const grip = hand.thumb > CFG.grabAt && hand.fingers > CFG.grabAt;
   palmPoint(tmpP);
   if (grip && !hand.wasGrip && !hand.grabbed && parts.length && !failing) {
-    let near = Infinity;
-    for (const pt of parts) near = Math.min(near, pt.p.distanceTo(tmpP));
+    let near = Infinity, nearPt = null;
+    for (const pt of parts) { const d = pt.p.distanceTo(tmpP); if (d < near) { near = d; nearPt = pt; } }
     if (near < CFG.grabReach) {
+      // 手のひらに一番近い生地のまわりをまとめてつかむ（少し離れていても届く）
+      const center = nearPt.p.clone().lerp(tmpP, 0.3);
       const list = [];
-      for (const pt of parts) if (pt.p.distanceTo(tmpP) < CFG.grabR) { pt.held = true; pt.o.copy(pt.p).sub(hand.pos); list.push(pt); }
+      for (const pt of parts) if (pt.p.distanceTo(center) < CFG.grabR) { pt.held = true; pt.o.copy(pt.p).sub(hand.pos); list.push(pt); }
       if (list.length) { hand.grabbed = list; rumble(0.5, 0.3, 80); if (startTime === null) startTime = performance.now(); }
     }
   }
@@ -321,8 +365,9 @@ function updateHand(dt) {
 // =====================================================================
 // 物理
 // =====================================================================
-let slamCool = 0, thrownT = 0;
+let slamCool = 0, thrownT = 0, noPressT = 0;
 function step(dt) {
+  const stiffNow = CFG.stiff + CFG.firmUp * prog / 100; // まとまるほど、しっかりして形がくずれにくい
   const pr = CFG.spacing * 0.5, minD = CFG.spacing * 0.85, g = CFG.gravity * dt * dt;
   for (const pt of parts) {
     if (pt.held) continue;
@@ -333,7 +378,7 @@ function step(dt) {
   // 叩きつけ判定のため、まな板に当たる前の下向きの速さ
   let impact = 0, impactN = 0;
   for (const pt of parts) {
-    if (pt.held || !onBoard(pt.p) || pt.p.y > pr + 0.05) continue;
+    if (pt.held || !onBoard(pt.p) || pt.p.y > boardY(pt.p.x, pt.p.z) + pr + 0.05) continue;
     const vy = (pt.q.y - pt.p.y) / dt; if (vy > 0) { impact += vy; impactN++; }
   }
   const handSpeedDown = -hand.vel.y;
@@ -341,13 +386,13 @@ function step(dt) {
   let pressMove = 0;
   for (let it = 0; it < CFG.iterations; it++) {
     // つかんでいる生地は手についてくる
-    if (hand.grabbed) for (const pt of hand.grabbed) { pt.p.copy(hand.pos).add(pt.o); if (pt.p.y < pr) pt.p.y = pr; }
+    if (hand.grabbed) for (const pt of hand.grabbed) { pt.p.copy(hand.pos).add(pt.o); const fy = (onBoard(pt.p) ? boardY(pt.p.x, pt.p.z) : 0) + pr; if (pt.p.y < fy) pt.p.y = fy; }
     for (const sp of springs) {
       const a = sp.a.p, b = sp.b.p;
       const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
       const d = Math.hypot(dx, dy, dz) || 1e-5;
       const wa = sp.a.held ? 0 : 1, wb = sp.b.held ? 0 : 1, ws = wa + wb; if (!ws) continue;
-      const f = (d - sp.rest) / d * (sp.near ? CFG.stiff : CFG.stiff * 0.5);
+      const f = (d - sp.rest) / d * (sp.near ? stiffNow : stiffNow * 0.5);
       a.x += dx * f * wa / ws; a.y += dy * f * wa / ws; a.z += dz * f * wa / ws;
       b.x -= dx * f * wb / ws; b.y -= dy * f * wb / ws; b.z -= dz * f * wb / ws;
     }
@@ -368,7 +413,7 @@ function step(dt) {
       }
     }
     // 開いた手（つかんでいない手）の手のひらが生地を押しのける
-    if (!hand.grabbed) {
+    if (!hand.grabbed && noPressT <= 0) {
       const R = CFG.palmR;
       for (const pt of parts) {
         const dx = pt.p.x - tmpP.x, dz = pt.p.z - tmpP.z;
@@ -386,29 +431,34 @@ function step(dt) {
       }
     }
     for (const pt of parts) {
-      const floor = onBoard(pt.p) || inOven(pt.p) ? pr : -40;
+      const floor = onBoard(pt.p) ? boardY(pt.p.x, pt.p.z) + pr : inOven(pt.p) ? pr : -40;
       if (pt.p.y < floor) pt.p.y = floor;
     }
   }
+  const sx = Math.sin(table.tx) * CFG.gravity * CFG.slide * dt * dt, sz = -Math.sin(table.tz) * CFG.gravity * CFG.slide * dt * dt;
+  const fr = 1 - Math.exp(-CFG.fricK * dt);
   for (const pt of parts) {
     if (pt.held) continue;
-    if ((onBoard(pt.p) || inOven(pt.p)) && pt.p.y <= pr + 0.01) { pt.q.x += (pt.p.x - pt.q.x) * CFG.fric; pt.q.z += (pt.p.z - pt.q.z) * CFG.fric; if (pt.q.y < pt.p.y) pt.q.y = pt.p.y; }
+    const floor = onBoard(pt.p) ? boardY(pt.p.x, pt.p.z) + pr : inOven(pt.p) ? pr : -40;
+    // 傾いた台の上では、生地が低い方へ滑る
+    if (onBoard(pt.p) && pt.p.y <= floor + 0.05) { pt.p.x += sx; pt.p.z += sz; }
+    if (pt.p.y <= floor + 0.01) { pt.q.x += (pt.p.x - pt.q.x) * fr; pt.q.z += (pt.p.z - pt.q.z) * fr; if (pt.q.y < pt.p.y) pt.q.y = pt.p.y; }
   }
   // 塑性
   const pl = Math.min(1, CFG.plast * dt);
   for (const sp of springs) {
     const len = sp.a.p.distanceTo(sp.b.p), strain = (len - sp.rest) / sp.rest;
     if (Math.abs(strain) > CFG.yieldS) sp.rest += (len - Math.sign(strain) * CFG.yieldS * sp.rest - sp.rest) * pl;
-    sp.rest += (sp.rest0 - sp.rest) * Math.min(1, CFG.recov * dt);
+    sp.rest += (sp.rest0 - sp.rest) * Math.min(1, (CFG.recov + CFG.roundUp * prog / 100) * dt); // まとまるほど、元の丸い形へ早く戻る
     sp.rest = THREE.MathUtils.clamp(sp.rest, sp.rest0 * 0.5, sp.rest0 * 2.5);
   }
   // ---- 叩きつけ：つかんだまま勢いよく下ろして、生地がまな板に当たった ----
-  slamCool = Math.max(0, slamCool - dt); thrownT = Math.max(0, thrownT - dt);
+  slamCool = Math.max(0, slamCool - dt); thrownT = Math.max(0, thrownT - dt); noPressT = Math.max(0, noPressT - dt);
   if (!failing && !done && slamCool <= 0) {
     // つかんだまま叩きつけた時か、投げた生地が落ちた時だけ
     const v = hand.grabbed ? handSpeedDown : thrownT > 0 && impactN >= 3 ? impact / impactN : 0;
     let touch = false;
-    if (hand.grabbed) { for (const pt of hand.grabbed) if (pt.p.y <= pr + 0.05) { touch = true; break; } }
+    if (hand.grabbed) { for (const pt of hand.grabbed) if (pt.p.y <= (onBoard(pt.p) ? boardY(pt.p.x, pt.p.z) : 0) + pr + 0.05) { touch = true; break; } }
     else touch = impactN >= 3;
     if (touch && v > CFG.slamSpeed) {
       slamCool = 0.35; thrownT = 0;
@@ -419,11 +469,20 @@ function step(dt) {
       // 叩きつけた勢いで、生地が横へつぶれて広がる
       for (const pt of parts) if (!pt.held && pt.p.y < 1.5) { const c = centroid(); pt.q.x -= (pt.p.x - c.x) * 0.04 * k; pt.q.z -= (pt.p.z - c.z) * 0.04 * k; }
       if (hand.grabbed) {
-        hand.vel.y = Math.max(hand.vel.y, 0);
+        hand.vel.y = CFG.handRecoil; noPressT = 0.45; // 手は反動で少し跳ね上がる（生地が跳ねるのをじゃましない）
         // 叩きつけたら、生地はその場で手から離れる（もう一度つかむには、指を開いてから握り直す）
         for (const pt of hand.grabbed) { pt.held = false; pt.q.copy(pt.p); }
         hand.grabbed = null;
         thrownT = 0;
+      }
+      // 叩きつけた反動で、生地がぽんっと少し跳ねて、ちょっと横にずれた所に着地する
+      {
+        const c = centroid();
+        const a = Math.random() * Math.PI * 2;
+        const dir = new THREE.Vector3(Math.cos(a), 0, Math.sin(a));
+        if (dir.lengthSq() > 1e-4) dir.normalize();
+        const hs = CFG.bounceSide * (0.5 + 0.5 * Math.random()), up = CFG.bounceUp * (0.8 + 0.2 * Math.min(1.5, k));
+        for (const pt of parts) { pt.q.x = pt.p.x - dir.x * hs / 60; pt.q.z = pt.p.z - dir.z * hs / 60; pt.q.y = pt.p.y - up / 60; }
       }
     }
   }
@@ -536,6 +595,8 @@ function updateFx(dt) {
   pGeo.attributes.position.needsUpdate = true;
 }
 function syncScene() {
+  // こね具合で細かさを切りかえる
+  { const lv = Math.min(MC_LEVELS.length - 1, Math.floor(prog / 100 * MC_LEVELS.length)); if (mcs[lv] !== mc) { mc.visible = false; mc = mcs[lv]; mc.visible = true; } }
   mc.reset();
   if (parts.length) {
     mc.position.set(0, MC_S - 1.0, 0);
@@ -585,7 +646,7 @@ function resize() {
 addEventListener('resize', resize);
 resize();
 resetGame();
-window.G = { hand, get parts() { return parts; }, get prog() { return prog; }, get fails() { return fails; }, get failing() { return failing; }, CFG, centroid };
+window.G = { setProg: v => { prog = v; }, hand, get parts() { return parts; }, get prog() { return prog; }, get fails() { return fails; }, get failing() { return failing; }, CFG, centroid };
 
 let last = performance.now();
 function frame(now) {
@@ -593,13 +654,14 @@ function frame(now) {
   const dt = Math.min(1 / 30, (now - last) / 1000); last = now;
   if (renderer.domElement.width !== Math.round(innerWidth * renderer.getPixelRatio())) resize();
   updateHand(dt);
+  updateTable(dt);
   if (parts.length) step(1 / 60);
   if (failing) { failing -= dt; if (failing <= 0) { failing = 0; spawnDough(true); } }
   updateFx(dt);
   updateOven(dt);
   shake *= Math.exp(-dt * 9);
-  // カメラ：つかんでいない間は手のアップで手についていく／つかんだら（投げた直後も）全体の俯瞰
-  const wide = !!hand.grabbed || thrownT > CFG.throwWindow - 1.2;
+  // カメラ：つかんでいない間は全体の俯瞰／つかんだら手のアップで手についていく
+  const wide = !hand.grabbed; // つかんでいない時は引き（俯瞰）、つかんだら手のアップ
   camMode += ((wide ? 1 : 0) - camMode) * Math.min(1, dt * CFG.camBlend);
   camClosePos.copy(hand.pos).add(CFG.camClose);
   camCloseLook.copy(hand.pos);
